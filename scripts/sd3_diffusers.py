@@ -115,6 +115,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
             negative_prompt_3 = split_negative[2].strip()
 
     if style != 0:
+        positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
+        negative_prompt = styles.styles_list[style][2] + negative_prompt
+
         positive_prompt_1 = styles.styles_list[style][1].replace("{prompt}", positive_prompt_1)
         positive_prompt_2 = styles.styles_list[style][1].replace("{prompt}", positive_prompt_2)
         positive_prompt_3 = styles.styles_list[style][1].replace("{prompt}", positive_prompt_3)

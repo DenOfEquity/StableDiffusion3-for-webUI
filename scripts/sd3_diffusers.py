@@ -362,7 +362,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
 #   load in LoRA, weight passed to pipe
 
-    if SD3Storage.lora != "(None)":
+    if SD3Storage.lora != "(None)" and i2iSource == None:
         lorafile = ".//models/diffusers//SD3Lora//" + SD3Storage.lora + ".safetensors"
         try:
             pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
@@ -374,7 +374,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 #adapter_weight_scales = { "unet": { "down": 1, "mid": 0, "up": 0} }
 #pipe.set_adapters("pixel", adapter_weight_scales)
 #pipe.set_adapters(["pixel", "toy"], adapter_weights=[0.5, 1.0])
-        pipe.transformer.set_adapters(SD3Storage.lora, adapter_weights=0.5)    #.set_adapters doesn't exist so no easy multiple LoRAs and weights
 
 #   i2i may require default FlowMatchEulerDiscreteScheduler
 
@@ -415,7 +414,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
                 image=i2iSource,
                 strength=i2iDenoise,
-                joint_attention_kwargs={"scale": SD3Storage.lora_scale }
             ).images
 
     del pipe, generator

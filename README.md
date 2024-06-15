@@ -29,7 +29,7 @@ prompt from [rollover @ civitAI](https://civitai.com/images/15668218)
 
 ---
 #### 15/06/2024 ####
-* LoRA support, with weight. Put them in ```models\diffusers\SD3Lora```. Only one at a time, *set_adapters* not working for SD3 pipe? Note that not all out there are the right form, so generation might cancel. Error will be logged to console.
+* LoRA support, with weight. Put them in ```models\diffusers\SD3Lora```. Only one at a time, *set_adapters* not working for SD3 pipe? Note that not all out there are the right form, so generation might cancel. Error will be logged to console. Doesn't work in i2i, so will be ignored.
 
 #### 14/06/2024 ####
 * triple prompt button removed, all handled automatically now, as follows:

@@ -28,8 +28,14 @@ prompt from [rollover @ civitAI](https://civitai.com/images/15668218)
 ![](screenshot.png "UI screenshot")
 
 ---
+#### 17/06/2024 ####
+* minor change to add writing of noise settings to infotext
+
+#### 16/06/2024 ####
+* settings to colourize the initial noise. This offers some extra control over the output and is near-enough free. Leave strength at 0.0 to bypass it.
+
 #### 15/06/2024 ####
-* LoRA support, with weight. Put them in ```models\diffusers\SD3Lora```. Only one at a time, *set_adapters* not working for SD3 pipe? Note that not all out there are the right form, so generation might cancel. Error will be logged to console. Doesn't work in i2i, so will be ignored.
+* LoRA support, with weight. Put them in ```models\diffusers\SD3Lora```. Only one at a time, *set_adapters* not working for SD3 pipe? Note that not all out there are the right form, so generation might cancel. Error will be logged to console. Doesn't work with i2i, that pipeline doesn't accept the parameter. Starting to think I should aim to rewrite/combine the pipelines.
 
 #### 14/06/2024 ####
 * triple prompt button removed, all handled automatically now, as follows:

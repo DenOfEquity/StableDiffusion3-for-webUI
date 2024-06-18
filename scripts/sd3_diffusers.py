@@ -32,9 +32,12 @@ class SD3Storage:
     T5 = False
     i2iAllSteps = False
     redoEmbeds = True
+    noiseRGBA = [0.0, 0.0, 0.0, 0.0]
 
 from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
+
+from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, SASolverScheduler
 
 
 from diffusers.utils.torch_utils import randn_tensor
@@ -71,8 +74,9 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, clipskip, 
     if negative_prompt != "":
         prompt_text += (f"Negative: {negative_prompt}\n")
     generation_params_text = ", ".join([k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
+    noise_text = f"\nInitial noise: {SD3Storage.noiseRGBA}" if SD3Storage.noiseRGBA[3] != 0.0 else ""
 
-    return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}"
+    return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}{noise_text}"
 
 def predict(positive_prompt, negative_prompt, width, height, guidance_scale, clipskip, 
             num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, *args):
@@ -331,10 +335,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
         gc.collect()
         torch.cuda.empty_cache()
 
-    #   always generate the noise here
-    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
-
-
     if i2iSource == None:
         pipe = StableDiffusion3Pipeline.from_pretrained(
             source,
@@ -343,7 +343,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
             tokenizer  =None,   text_encoder  =None,
             tokenizer_2=None,   text_encoder_2=None,
             tokenizer_3=None,   text_encoder_3=None,
-            token=access_token
+            token=access_token,
             )
     else:
         pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
@@ -353,12 +353,49 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
                                 text_encoder  =None,
             tokenizer_2=None,   text_encoder_2=None,
             tokenizer_3=None,   text_encoder_3=None,
-            token=access_token
+            token=access_token,
             )
 
     pipe.to('cuda')
     pipe.enable_model_cpu_offload()
     pipe.vae.enable_slicing()       #tiling works once only?
+
+    #   always generate the noise here
+    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
+    shape = (
+        num_images,
+        pipe.transformer.config.in_channels,
+        int(height) // pipe.vae_scale_factor,
+        int(width) // pipe.vae_scale_factor,
+    )
+
+    latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
+    #   colour the initial noise
+    if SD3Storage.noiseRGBA[3] != 0.0:
+        nr = SD3Storage.noiseRGBA[0] ** 0.5
+        ng = SD3Storage.noiseRGBA[1] ** 0.5
+        nb = SD3Storage.noiseRGBA[2] ** 0.5
+
+        imageR = torch.tensor(np.full((8,8), (nr), dtype=np.float32))
+        imageG = torch.tensor(np.full((8,8), (ng), dtype=np.float32))
+        imageB = torch.tensor(np.full((8,8), (nb), dtype=np.float32))
+        image = torch.stack((imageR, imageG, imageB), dim=0).unsqueeze(0)
+
+        image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
+        image_latents = (pipe.vae.encode(image).latent_dist.sample(generator) - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+        image_latents = image_latents.repeat(num_images, 1, 1, 1)
+
+        image_latents = image_latents.repeat(num_images, 1, latents.size(2), latents.size(3))
+
+        for b in range(len(latents)):
+            for c in range(4):
+                latents[b][c] -= latents[b][c].mean()
+
+        torch.lerp (latents, image_latents, SD3Storage.noiseRGBA[3], out=latents)
+
+        del imageR, imageG, imageB, image, image_latents
+    #   end: colour the initial noise
+
 
 #   load in LoRA, weight passed to pipe
 
@@ -375,7 +412,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 #pipe.set_adapters("pixel", adapter_weight_scales)
 #pipe.set_adapters(["pixel", "toy"], adapter_weights=[0.5, 1.0])
 
-#   i2i may require default FlowMatchEulerDiscreteScheduler
+#    print (pipe.scheduler.compatibles)
 
     with torch.inference_mode():
         if i2iSource == None:
@@ -394,6 +431,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
          
                 output_type="pil",
                 generator=generator,
+                latents=latents,
                 joint_attention_kwargs={"scale": SD3Storage.lora_scale }
             ).images
         else:
@@ -411,12 +449,14 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
          
                 output_type="pil",
                 generator=generator,
+                latents=latents,
 
                 image=i2iSource,
                 strength=i2iDenoise,
             ).images
+            del i2iSource
 
-    del pipe, generator
+    del pipe, generator, latents
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -510,7 +550,8 @@ def on_ui_tabs():
             SD3Storage.i2iAllSteps = False
             return gr.Button.update(variant='secondary')
 
-    def toggleGenerate (lora, scale):
+    def toggleGenerate (R, G, B, A, lora, scale):
+        SD3Storage.noiseRGBA = [R, G, B, A]
         SD3Storage.lora = lora
         SD3Storage.lora_scale = scale# if lora != "(None)" else 1.0
         return gr.Button.update(value='...', variant='secondary', interactive=False)
@@ -558,6 +599,13 @@ def on_ui_tabs():
                     reuseSeed = ToolButton(value='\u267b\ufe0f')
                     batch_size = gr.Number(label='Batch size', minimum=1, maximum=9, value=1, precision=0, scale=0)
 
+                with gr.Accordion(label='the colour of noise', open=False):
+                    with gr.Row():
+                        initialNoiseR = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
+                        initialNoiseG = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
+                        initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
+                        initialNoiseA = gr.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
+
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
                         i2iSource = gr.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
@@ -602,7 +650,7 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(toggleGenerate, inputs=[lora, scale], outputs=[generate_button])
+        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button])
         generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])
 
     return [(sd3_block, "StableDiffusion3", "sd3")]

@@ -34,7 +34,9 @@ class SD3Storage:
     redoEmbeds = True
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
 
-from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline
+from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
+#from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
+
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
 from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, SASolverScheduler
@@ -79,15 +81,28 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, clipskip, 
     return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}{noise_text}"
 
 def predict(positive_prompt, negative_prompt, width, height, guidance_scale, clipskip, 
-            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, *args):
+            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, controlNet, controlNetImage, controlNetStrength, *args):
 
     torch.set_grad_enabled(False)
+    
+    
+    if controlNet != 0 and controlNetImage != None:
+        useControlNet = ['InstantX/SD3-Controlnet-Canny', 'InstantX/SD3-Controlnet-Pose', '/InstantX/SD3-Controlnet-Tile'][controlNet]
+    else:
+        useControlNet = False
+        
+    #override until updated diffusers release
+    useControlNet = False
 
-    if i2iSource != None:
+
+    if i2iSource != None and i2iDenoise < 1.0:
         if i2iDenoise < (num_steps + 1) / 1000:
             i2iDenoise = (num_steps + 1) / 1000
         if SD3Storage.i2iAllSteps == True:
             num_steps = int(num_steps / i2iDenoise)
+        useImage2Image = True
+    else:
+        useImage2Image = False
 
     #   triple prompt, automatic support, no longer needs button to enable
     split_positive = positive_prompt.split('|')
@@ -163,7 +178,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
             tokenizer = T5TokenizerFast.from_pretrained(
                 source, local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder='tokenizer_3',
-                torch_dtype=torch.float16, )
+                torch_dtype=torch.float16,
+                token=access_token,
+                )
 
             text_inputs = tokenizer(
                 positive_prompt_3,          padding="max_length", max_length=512, truncation=True,
@@ -181,8 +198,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
                 source, local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder='text_encoder_3',
                 torch_dtype=torch.float16,
-                device_map='auto'
-                )
+                device_map='auto',
+                token=access_token,
+               )
             
             positive_embeds = text_encoder(positive_input_ids)[0]
             _, seq_len, _ = positive_embeds.shape
@@ -207,7 +225,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
         tokenizer = CLIPTokenizer.from_pretrained(
             source, local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder='tokenizer',
-            torch_dtype=torch.float16, )
+            torch_dtype=torch.float16,
+            token=access_token,
+            )
 
         text_inputs = tokenizer(
             positive_prompt_1,         padding="max_length",  max_length=77,  truncation=True,
@@ -225,6 +245,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
             source, local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder='text_encoder',
             torch_dtype=torch.float16,
+            token=access_token,
             )
         text_encoder.to('cuda')
 
@@ -258,7 +279,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
         tokenizer = CLIPTokenizer.from_pretrained(
             source, local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder='tokenizer_2',
-            torch_dtype=torch.float16, )
+            torch_dtype=torch.float16,
+            token=access_token,
+            )
 
         text_inputs = tokenizer(
             positive_prompt_2,         padding="max_length",  max_length=77,  truncation=True,
@@ -276,6 +299,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
             source, local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder='text_encoder_2',
             torch_dtype=torch.float16,
+            token=access_token,
             )
         text_encoder.to('cuda')
 
@@ -335,22 +359,34 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
         gc.collect()
         torch.cuda.empty_cache()
 
-    if i2iSource == None:
-        pipe = StableDiffusion3Pipeline.from_pretrained(
+    if useControlNet != False:
+        pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
             source,
             local_files_only=False, cache_dir=".//models//diffusers//",
             torch_dtype=torch.float16,
-            tokenizer  =None,   text_encoder  =None,
+                                text_encoder  =None,
             tokenizer_2=None,   text_encoder_2=None,
             tokenizer_3=None,   text_encoder_3=None,
             token=access_token,
+            controlnet=useControlNet
             )
-    else:
+            #controlNet and img2img?
+    elif useImage2Image == True:
         pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
             source,
             local_files_only=False, cache_dir=".//models//diffusers//",
             torch_dtype=torch.float16,
                                 text_encoder  =None,
+            tokenizer_2=None,   text_encoder_2=None,
+            tokenizer_3=None,   text_encoder_3=None,
+            token=access_token,
+            )
+    else:
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            source,
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            torch_dtype=torch.float16,
+            tokenizer  =None,   text_encoder  =None,
             tokenizer_2=None,   text_encoder_2=None,
             tokenizer_3=None,   text_encoder_3=None,
             token=access_token,
@@ -371,7 +407,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
     latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
     #   colour the initial noise
-    if SD3Storage.noiseRGBA[3] != 0.0:
+    if useImage2Image == False and SD3Storage.noiseRGBA[3] != 0.0:
         nr = SD3Storage.noiseRGBA[0] ** 0.5
         ng = SD3Storage.noiseRGBA[1] ** 0.5
         nb = SD3Storage.noiseRGBA[2] ** 0.5
@@ -399,7 +435,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
 #   load in LoRA, weight passed to pipe
 
-    if SD3Storage.lora != "(None)" and i2iSource == None:
+    if SD3Storage.lora != "(None)" and useImage2Image == False:# and useControlNet == False:
         lorafile = ".//models/diffusers//SD3Lora//" + SD3Storage.lora + ".safetensors"
         try:
             pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
@@ -415,7 +451,8 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 #    print (pipe.scheduler.compatibles)
 
     with torch.inference_mode():
-        if i2iSource == None:
+        if useControlNet == True:
+            controlNetImage = controlNetImage.resize((width, height))
             output = pipe(
                 prompt=None,
                 negative_prompt=None, 
@@ -423,39 +460,56 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
                 height=height,
                 width=width,
                 guidance_scale=guidance_scale,
-
                 prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
                 negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
                 pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
                 negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
-         
                 output_type="pil",
                 generator=generator,
                 latents=latents,
-                joint_attention_kwargs={"scale": SD3Storage.lora_scale }
+
+                control_image=controlNetImage, 
+                controlnet_conditioning_scale=controlNetStrength,  
+                joint_attention_kwargs={"scale": SD3Storage.lora_scale }    # does this work too?
             ).images
-        else:
+            del controlNetImage
+        elif useImage2Image:
             i2iSource = i2iSource.resize((width, height))
             output = pipe(
                 prompt=None,
                 negative_prompt=None, 
                 num_inference_steps=num_steps,
                 guidance_scale=guidance_scale,
-
                 prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
                 negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
                 pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
                 negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
-         
                 output_type="pil",
                 generator=generator,
-                latents=latents,
+#                latents=latents,
 
                 image=i2iSource,
                 strength=i2iDenoise,
             ).images
             del i2iSource
+        else:
+            output = pipe(
+                prompt=None,
+                negative_prompt=None, 
+                num_inference_steps=num_steps,
+                height=height,
+                width=width,
+                guidance_scale=guidance_scale,
+                prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
+                negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
+                pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
+                negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
+                output_type="pil",
+                generator=generator,
+                latents=latents,
 
+                joint_attention_kwargs={"scale": SD3Storage.lora_scale }
+            ).images
     del pipe, generator, latents
 
     gc.collect()
@@ -606,6 +660,13 @@ def on_ui_tabs():
                         initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
                         initialNoiseA = gr.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
 
+                with gr.Accordion(label='ControlNet', open=False):
+                    with gr.Row():
+                        CNSource = gr.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gr.Column():
+                            CNMethod = gr.Dropdown(['(None)', 'canny', 'pose', 'tile'], label='method', value='(None)', type='index', multiselect=False, scale=1)
+                            CNStrength = gr.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
+
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
                         i2iSource = gr.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
@@ -618,7 +679,7 @@ def on_ui_tabs():
                             i2iFromGallery = gr.Button(value='Get image from gallery')
 
                 ctrls = [positive_prompt, negative_prompt, width, height, guidance_scale, clipskip, steps, sampling_seed,
-                         batch_size, style, i2iSource, i2iDenoise]
+                         batch_size, style, i2iSource, i2iDenoise, CNMethod, CNSource, CNStrength]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary', visible=True)

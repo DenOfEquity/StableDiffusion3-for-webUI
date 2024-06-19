@@ -28,6 +28,11 @@ prompt from [rollover @ civitAI](https://civitai.com/images/15668218)
 ![](screenshot.png "UI screenshot")
 
 ---
+#### 19/06/2024 ####
+* fix model loading - didn't remember to pass access token to everything after manual tokenize/text_encode passes. So probably every previous uploaded version was broken.
+* (added ControlNet support. Currently disabled, and untested, pending diffusers update. Will it work with img2img? with loras? Dunno.)
+* colouring the noise is bypassed with image2image - get corrupted results if pass latents to i2i.
+
 #### 17/06/2024 ####
 * minor change to add writing of noise settings to infotext
 

@@ -22,6 +22,7 @@ import customStylesListSD3 as styles
 
 class SD3Storage:
     lastSeed = -1
+    galleryIndex = 0
     combined_positive = None
     combined_negative = None
     positive_embeds = None

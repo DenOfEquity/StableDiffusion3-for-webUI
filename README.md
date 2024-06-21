@@ -6,11 +6,11 @@ I don't think there is anything Forge specific here.
 ---
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
-### needs *diffusers 0.29.0* ###
+### SD3 (with controlNet) needs *diffusers 0.29.1* ###
 
 Easiest way to ensure necessary diffusers release is installed is to edit **requirements_versions.txt** in the webUI directory.
 ```
-diffusers>=0.29.0
+diffusers>=0.29.1
 ```
 
 **Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there.
@@ -21,16 +21,24 @@ diffusers>=0.29.0
 ### downloads models on first use - ~5.6GB minimum (~14.4GB including T5 text encoder) ###
 
 ---
-UI screenshot
-
-prompt from [rollover @ civitAI](https://civitai.com/images/15668218)
+current UI screenshot
 
 ![](screenshot.png "UI screenshot")
 
 ---
+#### 21/06/2024 ####
+* diffusers 0.29.1 is out, with controlNet for SD3. Models are downloaded on first use, ~1.1GB each. Note the control image must already be pre-processed, you can use controlNet in main txt2img tab for this, or external application. Currently trained best at 1024x1024, but this image size isn't enforced. Prompt should agree with controlNet: if using a sitting pose, have 'sitting' in the prompt.
+* added control of 'shift', which is a scaling adjustment to sigmas used internally.
+* added ability to disable any of the text encoders, different results to sending empty prompt. Note the sub-prompt interpretation remains the same as previously described (14/06).
+
+#### 19/06/2024 B ####
+* made my own pipeline (hacked together standard SD3 pipeline and image2image pipeline). Now LoRA and noise colouring work alongside image2image, though the i2i effect is the strongest. Now to put ControlNet in there too.
+* added CFG rescaling.
+
+
 #### 19/06/2024 ####
-* fix model loading - didn't remember to pass access token to everything after manual tokenize/text_encode passes. So probably every previous uploaded version was broken.
-* (added ControlNet support. Currently disabled, and untested, pending diffusers update. Will it work with img2img? with loras? Dunno.)
+* fix model loading - didn't remember to pass access token to everything after moving to manual tokenize/text_encode passes. So probably every previous uploaded version was broken.
+* ~~(added ControlNet support. Currently disabled, and untested, pending diffusers update. Will it work with img2img? with loras? Dunno. Will need diffusers 0.30 anyway.)~~
 * colouring the noise is bypassed with image2image - get corrupted results if pass latents to i2i.
 
 #### 17/06/2024 ####

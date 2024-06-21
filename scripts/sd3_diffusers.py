@@ -18,6 +18,9 @@ from PIL import Image
 #torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 
+#   when control pipeline released, aim to cobine all three into
+#   current image2image use of latents input is moronic
+
 import customStylesListSD3 as styles
 
 class SD3Storage:
@@ -30,18 +33,20 @@ class SD3Storage:
     positive_pooled = None
     negative_pooled = None
     clipskip = 0
+    CL = True
+    CG = True
     T5 = False
     i2iAllSteps = False
     redoEmbeds = True
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
 
-from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
-#from diffusers.models import SD3ControlNetModel, SD3MultiControlNetModel
+#from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler
+
+from SD3_pipeline import SD3Pipeline_DoE_combined
+from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
-
-from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, SASolverScheduler
-
 
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -62,14 +67,19 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 # modules/processing.py
-def create_infotext(positive_prompt, negative_prompt, guidance_scale, clipskip, steps, seed, width, height):
+def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_rescale, shift, clipskip, steps, seed, width, height, controlNetSettings):
     generation_params = {
+        "CLIP-L": '✓' if SD3Storage.CL else '✗',
+        "CLIP-G": '✓' if SD3Storage.CG else '✗',
+        "T5":     '✓' if SD3Storage.T5 else '✗', #2713, 2717
         "Size": f"{width}x{height}",
         "Seed": seed,
         "Steps": steps,
-        "CFG": f"{guidance_scale}",
+        "CFG": f"{guidance_scale}({guidance_rescale})",
+        "Shift": f"{shift}",
         "Clip skip": f"{clipskip}",
-        "RNG": opts.randn_source if opts.randn_source != "GPU" else None
+        "RNG": opts.randn_source if opts.randn_source != "GPU" else None,
+        "controlNet": controlNetSettings,
     }
 #add loras list and scales
 
@@ -81,29 +91,34 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, clipskip, 
 
     return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(positive_prompt, negative_prompt, width, height, guidance_scale, clipskip, 
-            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, controlNet, controlNetImage, controlNetStrength, *args):
+def predict(positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, shift, clipskip, 
+            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, 
+            controlNet, controlNetImage, controlNetStrength, controlNetStart, controlNetEnd, 
+            *args):
 
     torch.set_grad_enabled(False)
     
+    # do I care about catching this?
+#    if SD3Storage.CL == False and SD3Storage.CG == False and SD3Storage.T5 == False:
     
-    if controlNet != 0 and controlNetImage != None:
-        useControlNet = ['InstantX/SD3-Controlnet-Canny', 'InstantX/SD3-Controlnet-Pose', '/InstantX/SD3-Controlnet-Tile'][controlNet]
+    if controlNet != 0 and controlNetImage != None and controlNetStrength > 0.0:
+        controlNetImage = controlNetImage.resize((width, height))
+        useControlNet = ['InstantX/SD3-Controlnet-Canny', 'InstantX/SD3-Controlnet-Pose', 'InstantX/SD3-Controlnet-Tile'][controlNet-1]
     else:
-        useControlNet = False
+        controlNetStrength = 0.0
+        useControlNet = None
         
-    #override until updated diffusers release
-    useControlNet = False
-
 
     if i2iSource != None and i2iDenoise < 1.0:
         if i2iDenoise < (num_steps + 1) / 1000:
             i2iDenoise = (num_steps + 1) / 1000
         if SD3Storage.i2iAllSteps == True:
             num_steps = int(num_steps / i2iDenoise)
-        useImage2Image = True
+
+        i2iSource = i2iSource.resize((width, height))
     else:
-        useImage2Image = False
+        i2iSource = None
+        i2iDenoise = 1.0
 
     #   triple prompt, automatic support, no longer needs button to enable
     split_positive = positive_prompt.split('|')
@@ -152,7 +167,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
         negative_prompt_2 = styles.styles_list[style][2] + negative_prompt_2
         negative_prompt_3 = styles.styles_list[style][2] + negative_prompt_3
 
-    combined_positive = positive_prompt_1 + " |\n" + positive_prompt_2 + " |\n" + positive_prompt_3
+    combined_positive = positive_prompt_1 + " |\n"
+    combined_positive += ("[repeat 1]" if positive_prompt_2 == positive_prompt_1 else positive_prompt_2) + " |\n"
+    combined_positive += ("[repeat 1]" if positive_prompt_3 == positive_prompt_1 else ("[repeat 2]" if positive_prompt_3 == positive_prompt_2 else positive_prompt_3))
     combined_negative = negative_prompt_1 + " |\n" + negative_prompt_2 + " |\n" + negative_prompt_3
 
     gc.collect()
@@ -164,8 +181,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
     source = "stabilityai/stable-diffusion-3-medium-diffusers"
     with open('huggingface_access_token.txt', 'r') as file:
         access_token = file.read().rstrip()
-
-# 3 positives, 3 negatives (1 of each necessary)
 
     useCachedEmbeds = (SD3Storage.combined_positive == combined_positive and
                        SD3Storage.combined_negative == combined_negative and
@@ -216,119 +231,131 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
             del text_encoder
         else:
             #512 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_3 = torch.zeros((num_images, 512, 4096),
-                                            device='cpu', dtype=torch.float16, )
-            negative_embeds_3 = torch.zeros((num_images, 512, 4096),
-                                            device='cpu', dtype=torch.float16, )
+            positive_embeds_3 = torch.zeros((num_images, 512, 4096),    device='cpu', dtype=torch.float16, )
+            negative_embeds_3 = torch.zeros((num_images, 512, 4096),    device='cpu', dtype=torch.float16, )
             #end: T5
 
     #   do first CLIP
-        tokenizer = CLIPTokenizer.from_pretrained(
-            source, local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder='tokenizer',
-            torch_dtype=torch.float16,
-            token=access_token,
-            )
+        if SD3Storage.CL == True:
+            tokenizer = CLIPTokenizer.from_pretrained(
+                source, local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder='tokenizer',
+                torch_dtype=torch.float16,
+                token=access_token,
+                )
 
-        text_inputs = tokenizer(
-            positive_prompt_1,         padding="max_length",  max_length=77,  truncation=True,
-            return_tensors="pt", )
-        positive_input_ids = text_inputs.input_ids
+            text_inputs = tokenizer(
+                positive_prompt_1,         padding="max_length",  max_length=77,  truncation=True,
+                return_tensors="pt", )
+            positive_input_ids = text_inputs.input_ids
 
-        text_inputs = tokenizer(
-            negative_prompt_1,         padding="max_length",  max_length=77,  truncation=True,
-            return_tensors="pt", )
-        negative_input_ids = text_inputs.input_ids
+            text_inputs = tokenizer(
+                negative_prompt_1,         padding="max_length",  max_length=77,  truncation=True,
+                return_tensors="pt", )
+            negative_input_ids = text_inputs.input_ids
 
-        del tokenizer
+            del tokenizer
 
-        text_encoder = CLIPTextModelWithProjection.from_pretrained(
-            source, local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder='text_encoder',
-            torch_dtype=torch.float16,
-            token=access_token,
-            )
-        text_encoder.to('cuda')
+            text_encoder = CLIPTextModelWithProjection.from_pretrained(
+                source, local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder='text_encoder',
+                torch_dtype=torch.float16,
+                token=access_token,
+                )
+            text_encoder.to('cuda')
 
-        positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
-        negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
-        del text_encoder
+            positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
+            negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
+            del text_encoder
 
-        pooled_positive_embeds = positive_embeds[0]
-        pooled_negative_embeds = negative_embeds[0]
+            pooled_positive_embeds = positive_embeds[0]
+            pooled_negative_embeds = negative_embeds[0]
 
-        if clipskip == 0:
-            positive_embeds = positive_embeds.hidden_states[-2]
+            if clipskip == 0:
+                positive_embeds = positive_embeds.hidden_states[-2]
+            else:
+                positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
+
+            negative_embeds = negative_embeds.hidden_states[-2]
+
+            _, seq_len, _ = positive_embeds.shape
+            positive_embeds = positive_embeds.repeat(1, num_images, 1)
+            positive_embeds_1 = positive_embeds.view(num_images, seq_len, -1)
+            pooled_positive_embeds = pooled_positive_embeds.repeat(1, num_images, 1)
+            pooled_positive_embeds_1 = pooled_positive_embeds.view(num_images, -1)
+
+            _, seq_len, _ = negative_embeds.shape
+            negative_embeds = negative_embeds.repeat(1, num_images, 1)
+            negative_embeds_1 = negative_embeds.view(num_images, seq_len, -1)
+            pooled_negative_embeds = pooled_negative_embeds.repeat(1, num_images, 1)
+            pooled_negative_embeds_1 = pooled_negative_embeds.view(num_images, -1)
         else:
-            positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
-
-        negative_embeds = negative_embeds.hidden_states[-2]
-
-        _, seq_len, _ = positive_embeds.shape
-        positive_embeds = positive_embeds.repeat(1, num_images, 1)
-        positive_embeds_1 = positive_embeds.view(num_images, seq_len, -1)
-        pooled_positive_embeds = pooled_positive_embeds.repeat(1, num_images, 1)
-        pooled_positive_embeds_1 = pooled_positive_embeds.view(num_images, -1)
-
-        _, seq_len, _ = negative_embeds.shape
-        negative_embeds = negative_embeds.repeat(1, num_images, 1)
-        negative_embeds_1 = negative_embeds.view(num_images, seq_len, -1)
-        pooled_negative_embeds = pooled_negative_embeds.repeat(1, num_images, 1)
-        pooled_negative_embeds_1 = pooled_negative_embeds.view(num_images, -1)
+            #77 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
+            positive_embeds_1 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
+            negative_embeds_1 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
+            pooled_positive_embeds_1 = torch.zeros((num_images, 768),   device='cuda', dtype=torch.float16, )
+            pooled_negative_embeds_1 = torch.zeros((num_images, 768),   device='cuda', dtype=torch.float16, )
 
     #   do second CLIP
-        tokenizer = CLIPTokenizer.from_pretrained(
-            source, local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder='tokenizer_2',
-            torch_dtype=torch.float16,
-            token=access_token,
-            )
+        if SD3Storage.CG == True:
+            tokenizer = CLIPTokenizer.from_pretrained(
+                source, local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder='tokenizer_2',
+                torch_dtype=torch.float16,
+                token=access_token,
+                )
 
-        text_inputs = tokenizer(
-            positive_prompt_2,         padding="max_length",  max_length=77,  truncation=True,
-            return_tensors="pt", )
-        positive_input_ids = text_inputs.input_ids
+            text_inputs = tokenizer(
+                positive_prompt_2,         padding="max_length",  max_length=77,  truncation=True,
+                return_tensors="pt", )
+            positive_input_ids = text_inputs.input_ids
 
-        text_inputs = tokenizer(
-            negative_prompt_2,         padding="max_length",  max_length=77,  truncation=True,
-            return_tensors="pt", )
-        negative_input_ids = text_inputs.input_ids
+            text_inputs = tokenizer(
+                negative_prompt_2,         padding="max_length",  max_length=77,  truncation=True,
+                return_tensors="pt", )
+            negative_input_ids = text_inputs.input_ids
 
-        del tokenizer
+            del tokenizer
 
-        text_encoder = CLIPTextModelWithProjection.from_pretrained(
-            source, local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder='text_encoder_2',
-            torch_dtype=torch.float16,
-            token=access_token,
-            )
-        text_encoder.to('cuda')
+            text_encoder = CLIPTextModelWithProjection.from_pretrained(
+                source, local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder='text_encoder_2',
+                torch_dtype=torch.float16,
+                token=access_token,
+                )
+            text_encoder.to('cuda')
 
-        positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
-        negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
-        del text_encoder
+            positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
+            negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
+            del text_encoder
 
-        pooled_positive_embeds = positive_embeds[0]
-        pooled_negative_embeds = negative_embeds[0]
+            pooled_positive_embeds = positive_embeds[0]
+            pooled_negative_embeds = negative_embeds[0]
 
-        if clipskip is None:
-            positive_embeds = positive_embeds.hidden_states[-2]
+            if clipskip is None:
+                positive_embeds = positive_embeds.hidden_states[-2]
+            else:
+                positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
+
+            negative_embeds = negative_embeds.hidden_states[-2]
+
+            _, seq_len, _ = positive_embeds.shape
+            positive_embeds = positive_embeds.repeat(1, num_images, 1)
+            positive_embeds_2 = positive_embeds.view(num_images, seq_len, -1)
+            pooled_positive_embeds = pooled_positive_embeds.repeat(1, num_images, 1)
+            pooled_positive_embeds_2 = pooled_positive_embeds.view(num_images, -1)
+
+            _, seq_len, _ = negative_embeds.shape
+            negative_embeds = negative_embeds.repeat(1, num_images, 1)
+            negative_embeds_2 = negative_embeds.view(num_images, seq_len, -1)
+            pooled_negative_embeds = pooled_negative_embeds.repeat(1, num_images, 1)
+            pooled_negative_embeds_2 = pooled_negative_embeds.view(num_images, -1)
         else:
-            positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
-
-        negative_embeds = negative_embeds.hidden_states[-2]
-
-        _, seq_len, _ = positive_embeds.shape
-        positive_embeds = positive_embeds.repeat(1, num_images, 1)
-        positive_embeds_2 = positive_embeds.view(num_images, seq_len, -1)
-        pooled_positive_embeds = pooled_positive_embeds.repeat(1, num_images, 1)
-        pooled_positive_embeds_2 = pooled_positive_embeds.view(num_images, -1)
-
-        _, seq_len, _ = negative_embeds.shape
-        negative_embeds = negative_embeds.repeat(1, num_images, 1)
-        negative_embeds_2 = negative_embeds.view(num_images, seq_len, -1)
-        pooled_negative_embeds = pooled_negative_embeds.repeat(1, num_images, 1)
-        pooled_negative_embeds_2 = pooled_negative_embeds.view(num_images, -1)
+            #77 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
+            positive_embeds_2 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
+            negative_embeds_2 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
+            pooled_positive_embeds_2 = torch.zeros((num_images, 1280),  device='cuda', dtype=torch.float16, )
+            pooled_negative_embeds_2 = torch.zeros((num_images, 1280),  device='cuda', dtype=torch.float16, )
 
         #merge
         clip_positive_embeds = torch.cat([positive_embeds_1, positive_embeds_2], dim=-1)
@@ -360,38 +387,24 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
         gc.collect()
         torch.cuda.empty_cache()
 
-    if useControlNet != False:
-        pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
-            source,
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            torch_dtype=torch.float16,
-                                text_encoder  =None,
-            tokenizer_2=None,   text_encoder_2=None,
-            tokenizer_3=None,   text_encoder_3=None,
-            token=access_token,
-            controlnet=useControlNet
-            )
-            #controlNet and img2img?
-    elif useImage2Image == True:
-        pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
-            source,
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            torch_dtype=torch.float16,
-                                text_encoder  =None,
-            tokenizer_2=None,   text_encoder_2=None,
-            tokenizer_3=None,   text_encoder_3=None,
-            token=access_token,
-            )
-    else:
-        pipe = StableDiffusion3Pipeline.from_pretrained(
-            source,
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            torch_dtype=torch.float16,
-            tokenizer  =None,   text_encoder  =None,
-            tokenizer_2=None,   text_encoder_2=None,
-            tokenizer_3=None,   text_encoder_3=None,
-            token=access_token,
-            )
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(source,
+                                                                subfolder='scheduler', local_files_only=False, cache_dir=".//models//diffusers//",
+                                                                shift=shift,
+                                                                token=access_token,)
+
+   
+    pipe = SD3Pipeline_DoE_combined.from_pretrained(
+        source,
+        local_files_only=False, cache_dir=".//models//diffusers//",
+        torch_dtype=torch.float16,
+                            text_encoder  =None,
+        tokenizer_2=None,   text_encoder_2=None,
+        tokenizer_3=None,   text_encoder_3=None,
+        scheduler=scheduler,
+        token=access_token,
+        controlnet=SD3ControlNetModel.from_pretrained(useControlNet, cache_dir=".//models//diffusers//", torch_dtype=torch.float16) if useControlNet else None
+    )
+    del scheduler
 
     pipe.to('cuda')
     pipe.enable_model_cpu_offload()
@@ -408,7 +421,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
     latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
     #   colour the initial noise
-    if useImage2Image == False and SD3Storage.noiseRGBA[3] != 0.0:
+    if SD3Storage.noiseRGBA[3] != 0.0:
         nr = SD3Storage.noiseRGBA[0] ** 0.5
         ng = SD3Storage.noiseRGBA[1] ** 0.5
         nb = SD3Storage.noiseRGBA[2] ** 0.5
@@ -436,7 +449,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
 #   load in LoRA, weight passed to pipe
 
-    if SD3Storage.lora != "(None)" and useImage2Image == False:# and useControlNet == False:
+    if SD3Storage.lora != "(None)":
         lorafile = ".//models/diffusers//SD3Lora//" + SD3Storage.lora + ".safetensors"
         try:
             pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
@@ -451,78 +464,51 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, cli
 
 #    print (pipe.scheduler.compatibles)
 
+    pipe.transformer.to(memory_format=torch.channels_last)
+    pipe.vae.to(memory_format=torch.channels_last)
+
     with torch.inference_mode():
-        if useControlNet == True:
-            controlNetImage = controlNetImage.resize((width, height))
-            output = pipe(
-                prompt=None,
-                negative_prompt=None, 
-                num_inference_steps=num_steps,
-                height=height,
-                width=width,
-                guidance_scale=guidance_scale,
-                prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
-                negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
-                pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
-                negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
-                output_type="pil",
-                generator=generator,
-                latents=latents,
+        output = pipe(
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            guidance_rescale=guidance_rescale,
 
-                control_image=controlNetImage, 
-                controlnet_conditioning_scale=controlNetStrength,  
-                joint_attention_kwargs={"scale": SD3Storage.lora_scale }    # does this work too?
-            ).images
-            del controlNetImage
-        elif useImage2Image:
-            i2iSource = i2iSource.resize((width, height))
-            output = pipe(
-                prompt=None,
-                negative_prompt=None, 
-                num_inference_steps=num_steps,
-                guidance_scale=guidance_scale,
-                prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
-                negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
-                pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
-                negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
-                output_type="pil",
-                generator=generator,
-#                latents=latents,
+            prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
+            negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
+            pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
+            negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
+            output_type="pil",
+            generator=generator,
+            latents=latents,
 
-                image=i2iSource,
-                strength=i2iDenoise,
-            ).images
-            del i2iSource
-        else:
-            output = pipe(
-                prompt=None,
-                negative_prompt=None, 
-                num_inference_steps=num_steps,
-                height=height,
-                width=width,
-                guidance_scale=guidance_scale,
-                prompt_embeds=SD3Storage.positive_embeds.to('cuda'),
-                negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
-                pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
-                negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
-                output_type="pil",
-                generator=generator,
-                latents=latents,
+            image=i2iSource,
+            strength=i2iDenoise,
 
-                joint_attention_kwargs={"scale": SD3Storage.lora_scale }
-            ).images
+            control_image=controlNetImage, 
+            controlnet_conditioning_scale=controlNetStrength,  
+            control_guidance_start=controlNetStart,
+            control_guidance_end=controlNetEnd,
+
+            joint_attention_kwargs={"scale": SD3Storage.lora_scale }
+        ).images
+        del controlNetImage, i2iSource
+
     del pipe, generator, latents
 
     gc.collect()
     torch.cuda.empty_cache()
 
+    if useControlNet != None:
+        useControlNet += f" strength: {controlNetStrength}, step range: {controlNetStart}-{controlNetEnd}"
+
     result = []
     for image in output:
         info=create_infotext(
-            combined_positive, combined_negative,
-            guidance_scale, clipskip, num_steps, 
+            combined_positive, combined_negative, 
+            guidance_scale, guidance_rescale, shift, clipskip, num_steps, 
             fixed_seed, 
-            width, height, )
+            width, height, 
+            useControlNet)
 
         result.append((image, info))
         
@@ -563,8 +549,6 @@ def on_ui_tabs():
     def refreshLoRAs ():
         loras = buildLoRAList ()
         return gr.Dropdown.update(choices=loras)
-
-
    
     def getGalleryIndex (evt: gr.SelectData):
         SD3Storage.galleryIndex = evt.index
@@ -596,6 +580,22 @@ def on_ui_tabs():
         else:
             SD3Storage.T5 = False
             return gr.Button.update(variant='secondary')
+    def toggleCL ():
+        SD3Storage.redoEmbeds = True
+        if SD3Storage.CL == False:
+            SD3Storage.CL = True
+            return gr.Button.update(variant='primary')
+        else:
+            SD3Storage.CL = False
+            return gr.Button.update(variant='secondary')
+    def toggleCG ():
+        SD3Storage.redoEmbeds = True
+        if SD3Storage.CG == False:
+            SD3Storage.CG = True
+            return gr.Button.update(variant='primary')
+        else:
+            SD3Storage.CG = False
+            return gr.Button.update(variant='secondary')
 
     def toggleAS ():
         if SD3Storage.i2iAllSteps == False:
@@ -604,6 +604,30 @@ def on_ui_tabs():
         else:
             SD3Storage.i2iAllSteps = False
             return gr.Button.update(variant='secondary')
+
+    def updateWH (idx, w, h):
+        #   returns None to dimensions dropdown so that it doesn't show as being set to particular values
+        #   width/height could be manually changed, making that display inaccurate and preventing immediate reselection of that option
+        if idx == 0:
+            return None, 1536, 672
+        if idx == 1:
+            return None, 1344, 768
+        if idx == 2:
+            return None, 1248, 832
+        if idx == 3:
+            return None, 1120, 896
+        if idx == 4:
+            return None, 1024, 1024
+        if idx == 5:
+            return None, 896, 1120
+        if idx == 6:
+            return None, 832, 1248
+        if idx == 7:
+            return None, 768, 1344
+        if idx == 8:
+            return None, 672, 1536
+        return None, w, h
+        
 
     def toggleGenerate (R, G, B, A, lora, scale):
         SD3Storage.noiseRGBA = [R, G, B, A]
@@ -615,44 +639,39 @@ def on_ui_tabs():
         with ResizeHandleRow():
             with gr.Column():
                 with gr.Row():
-                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.1)
-##                    scheduler = gr.Dropdown(["default",
-##                                             "DDPM",
-##                                             "DEIS",
-##                                             "DPM++ 2M",
-##                                             "DPM++ 2M SDE",
-##                                             "DPM",
-##                                             "DPM SDE",
-##                                             "Euler",
-##                                             "SA-solver",
-##                                             "UniPC",
-##                                             ],
-##                        label='Sampler', value="default", type='value', scale=0)
+                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                    CL = ToolButton(value='CL', variant='primary', tooltip='use CLIP-L text encoder')
+                    CG = ToolButton(value='CG', variant='primary', tooltip='use CLIP-G text encoder')
                     T5 = ToolButton(value='T5', variant='secondary', tooltip='use T5 text encoder')
+                with gr.Row():
+                    negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=1.01)
+                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value='(None)', type='index', scale=0)
 
                 with gr.Row():
-                    negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=1.1)
-                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value='(None)', type='index', scale=0)
+                    width = gr.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
+                    swapper = ToolButton(value='\U000021C4')
+                    height = gr.Slider(label='Height', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_height')
+                    dims = gr.Dropdown(['21:9 — 1568 \u00D7 672', '16:9 — 1344 \u00D7 768', '3:2 — 1248 \u00D7 832', '5:4 — 1120 \u00D7 896', 
+                                        '1:1 — 1024 \u00D7 1024',
+                                        '4:5 — 896 \u00D7 1120', '2:3 — 832 \u00D7 1248', '9:16 — 768 \u00D7 1344', '9:21 — 672 \u00D7 1568'],
+                                        label='Quickset', type='index', scale=0)
+
+                with gr.Row():
+                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=2)
+                    CFGrescale = gr.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
+                    shift = gr.Slider(label='Shift', minimum=1.0, maximum=8.0, step=0.1, value=3.0, scale=1)
+                    clipskip = gr.Slider(label='Clip skip', minimum=0, maximum=8, step=1, value=0, scale=1)
+                with gr.Row():
+                    steps = gr.Slider(label='Steps', minimum=1, maximum=80, step=1, value=20, scale=2)
+                    sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=0)
+                    random = ToolButton(value='\U0001f3b2\ufe0f')
+                    reuseSeed = ToolButton(value='\u267b\ufe0f')
+                    batch_size = gr.Number(label='Batch size', minimum=1, maximum=9, value=1, precision=1, scale=0)
 
                 with gr.Row(equal_height=True):
                     lora = gr.Dropdown([x for x in loras], label='LoRA', value="(None)", type='value', multiselect=False, scale=1)
                     refresh = ToolButton(value='\U0001f504')
                     scale = gr.Slider(label='LoRA weight', minimum=-1.0, maximum=1.0, value=1.0, step=0.01)
-
-                with gr.Row():
-                    width = gr.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
-                    swapper = ToolButton(value='\U000021C5')
-                    height = gr.Slider(label='Height', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_height')
-
-                with gr.Row():
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=2)
-                    clipskip = gr.Slider(label='Clip skip', minimum=0, maximum=8, step=1, value=0, scale=2)
-                with gr.Row():
-                    steps = gr.Slider(label='Steps', minimum=1, maximum=80, step=1, value=20, scale=2)
-                    sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=1)
-                    random = ToolButton(value='\U0001f3b2\ufe0f')
-                    reuseSeed = ToolButton(value='\u267b\ufe0f')
-                    batch_size = gr.Number(label='Batch size', minimum=1, maximum=9, value=1, precision=0, scale=0)
 
                 with gr.Accordion(label='the colour of noise', open=False):
                     with gr.Row():
@@ -663,14 +682,16 @@ def on_ui_tabs():
 
                 with gr.Accordion(label='ControlNet', open=False):
                     with gr.Row():
-                        CNSource = gr.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        CNSource = gr.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
                         with gr.Column():
                             CNMethod = gr.Dropdown(['(None)', 'canny', 'pose', 'tile'], label='method', value='(None)', type='index', multiselect=False, scale=1)
-                            CNStrength = gr.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
+                            CNStrength = gr.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+                            CNStart = gr.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
+                            CNEnd = gr.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
 
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
-                        i2iSource = gr.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        i2iSource = gr.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
                         with gr.Column():
                             with gr.Row():
                                 i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
@@ -679,8 +700,8 @@ def on_ui_tabs():
                             i2iSetWH = gr.Button(value='Set Width / Height from image')
                             i2iFromGallery = gr.Button(value='Get image from gallery')
 
-                ctrls = [positive_prompt, negative_prompt, width, height, guidance_scale, clipskip, steps, sampling_seed,
-                         batch_size, style, i2iSource, i2iDenoise, CNMethod, CNSource, CNStrength]
+                ctrls = [positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, shift, clipskip, steps, sampling_seed,
+                         batch_size, style, i2iSource, i2iDenoise, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary', visible=True)
@@ -699,8 +720,10 @@ def on_ui_tabs():
                         source_image_component=output_gallery,
                     ))
 
-
+        dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
         refresh.click(refreshLoRAs, inputs=[], outputs=[lora])
+        CL.click(toggleCL, inputs=[], outputs=CL)
+        CG.click(toggleCG, inputs=[], outputs=CG)
         T5.click(toggleT5, inputs=[], outputs=T5)
         AS.click(toggleAS, inputs=[], outputs=AS)
         swapper.click(fn=None, _js="function(){switchWidthHeight('StableDiffusion3')}", inputs=None, outputs=None, show_progress=False)

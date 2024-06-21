@@ -1,6 +1,5 @@
-##StableDiffusion3 for webui ##
-### Forge tested, probably A1111 too ###
-I don't think there is anything Forge specific here.
+## StableDiffusion3 for Forge webui ##
+I don't think there is anything Forge specific here. But A1111 has native support now.
 ### works for me <sup>TM</sup> on 8Gb VRAM, 16Gb RAM (GTX1070) ###
 
 ---

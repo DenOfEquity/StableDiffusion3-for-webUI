@@ -12,7 +12,7 @@ Easiest way to ensure necessary diffusers release is installed is to edit **requ
 diffusers>=0.29.1
 ```
 
-**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there.
+**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You might also need to accept the terms on the [SD3 Hugging Face page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
 
 **Do not download the single file models, this extension cannot use them.**
 
@@ -26,8 +26,10 @@ current UI screenshot
 
 ---
 #### 22/06/2024 ####
-* added captioning, in the image2image section. Uses [Florence-2-base](https://huggingface.co/microsoft/Florence-2-base) (faster, lighter than -large, still very good). Use the 'P' toggle button to overwrite the prompt when captions generated. Also captions are written to console.
+* added captioning, in the image2image section. Uses [Florence-2-base](https://huggingface.co/microsoft/Florence-2-base) (faster, lighter than -large, still very good). Use the 'P' toggle button to overwrite the prompt when captions generated. Also captions are written to console. Could add a toggle to use the larger model.
 * added guidance cutoff control - faster processing after cutoff at small-ish quality cost. Not compatible with controlNet, so setting ignored if controlNet active
+* ZN toggle zeroes out the negative text embeds, different result to encoding an empty prompt. Experimental, might tend to oversaturate.
+* 'rng' button generates some random alphanumerics for the negative prompt. SD3 doesn't seem to respect the negative much, so random characters can be used for tweaking outputs.
 
 #### 21/06/2024 ####
 * diffusers 0.29.1 is out, with controlNet for SD3. Models are downloaded on first use, ~1.1GB each. Note the control image must already be pre-processed, you can use controlNet in main txt2img tab for this, or external application. Currently trained best at 1024x1024, but this image size isn't enforced. Prompt should agree with controlNet: if using a sitting pose, have 'sitting' in the prompt. controlNets by [instantX](https://huggingface.co/InstantX)
@@ -42,7 +44,7 @@ current UI screenshot
 #### 19/06/2024 ####
 * fix model loading - didn't remember to pass access token to everything after moving to manual tokenize/text_encode passes. So probably every previous uploaded version was broken.
 * ~~(added ControlNet support. Currently disabled, and untested, pending diffusers update. Will it work with img2img? with loras? Dunno. Will need diffusers 0.30 anyway.)~~
-* colouring the noise is bypassed with image2image - get corrupted results if pass latents to i2i.
+* ~~colouring the noise is bypassed with image2image - get corrupted results if pass latents to i2i.~~
 
 #### 17/06/2024 ####
 * minor change to add writing of noise settings to infotext

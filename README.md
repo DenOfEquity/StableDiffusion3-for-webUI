@@ -20,7 +20,7 @@ diffusers>=0.29.1
 ### downloads models on first use - ~5.6GB minimum (~14.4GB including T5 text encoder) ###
 
 ---
-current UI screenshot
+almost current UI screenshot
 
 ![](screenshot.png "UI screenshot")
 

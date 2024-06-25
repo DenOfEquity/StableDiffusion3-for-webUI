@@ -150,11 +150,11 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             else 8
         )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, vae_latent_channels=self.latent_channels)
-        self.tokenizer_max_length = (
-            self.tokenizer.model_max_length
-            if hasattr(self, "tokenizer") and self.tokenizer is not None
-            else 77
-        )
+#        self.tokenizer_max_length = (
+#            self.tokenizer.model_max_length
+#            if hasattr(self, "tokenizer") and self.tokenizer is not None
+#            else 77
+#        )
         self.default_sample_size = (
             self.transformer.config.sample_size
             if hasattr(self, "transformer") and self.transformer is not None
@@ -321,7 +321,7 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         timesteps: List[int] = None,
         guidance_scale: float = 7.0,
         guidance_rescale: float = 0.0,
-        guidance_cutoff: float = 1.01,
+        guidance_cutoff: float = 1.0,
         num_images_per_prompt: Optional[int] = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
@@ -396,8 +396,8 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             )
 
             control_image = self.vae.encode(control_image).latent_dist.sample()
-            control_image = control_image * self.vae.config.scaling_factor
-#            control_image = (control_image - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+#            control_image = control_image * self.vae.config.scaling_factor
+            control_image = (control_image - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         elif isinstance(self.controlnet, SD3MultiControlNetModel):
             control_images = []
 
@@ -468,6 +468,16 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+                    
+                if float(i / len(timesteps)) > self._guidance_cutoff and self._guidance_scale != 1.0 and self.controlnet == None:
+                    # something else is wrong size for controlnet, but not anything that gets sent to controlnet from here.
+                    # something in controlnet init? but that is too early.. control_image.parameters?
+                    self._guidance_scale = 1.0
+                    prompt_embeds = prompt_embeds[1]
+                    pooled_prompt_embeds = pooled_prompt_embeds[1]
+                    if self.controlnet != None:
+                        controlnet_pooled_projections = controlnet_pooled_projections[1]
+                        control_image = control_image[1]
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
@@ -489,29 +499,23 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                         timestep=timestep,
                         encoder_hidden_states=prompt_embeds,
                         pooled_projections=controlnet_pooled_projections,
-                        joint_attention_kwargs=self.joint_attention_kwargs,
+                        joint_attention_kwargs=None,#self.joint_attention_kwargs,   #only check 'scale', default set to 1.0 - but scale used by LoRAs
                         controlnet_cond=control_image,
                         conditioning_scale=cond_scale,
                         return_dict=False,
                     )[0]
-                    noise_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep,
-                        encoder_hidden_states=prompt_embeds,
-                        pooled_projections=pooled_prompt_embeds,
-                        block_controlnet_hidden_states=control_block_samples,
-                        joint_attention_kwargs=self.joint_attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                else:   #mergeable? block_controlnet_hidden_states=None ?
-                    noise_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep,
-                        encoder_hidden_states=prompt_embeds,
-                        pooled_projections=pooled_prompt_embeds,
-                        joint_attention_kwargs=self.joint_attention_kwargs,
-                        return_dict=False,
-                    )[0]
+                else:
+                    control_block_samples = None
+
+                noise_pred = self.transformer(
+                    hidden_states=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    pooled_projections=pooled_prompt_embeds,
+                    block_controlnet_hidden_states=control_block_samples,
+                    joint_attention_kwargs=self.joint_attention_kwargs,
+                    return_dict=False,
+                )[0]
 
                 # perform guidance
                 if self.do_classifier_free_guidance:

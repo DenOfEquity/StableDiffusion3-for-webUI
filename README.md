@@ -25,8 +25,12 @@ current UI screenshot
 ![](screenshot.png "UI screenshot")
 
 ---
+#### 22/06/2024 ####
+* added captioning, in the image2image section. Uses [Florence-2-base](https://huggingface.co/microsoft/Florence-2-base) (faster, lighter than -large, still very good). Use the 'P' toggle button to overwrite the prompt when captions generated. Also captions are written to console.
+* added guidance cutoff control - faster processing after cutoff at small-ish quality cost. Not compatible with controlNet, so setting ignored if controlNet active
+
 #### 21/06/2024 ####
-* diffusers 0.29.1 is out, with controlNet for SD3. Models are downloaded on first use, ~1.1GB each. Note the control image must already be pre-processed, you can use controlNet in main txt2img tab for this, or external application. Currently trained best at 1024x1024, but this image size isn't enforced. Prompt should agree with controlNet: if using a sitting pose, have 'sitting' in the prompt.
+* diffusers 0.29.1 is out, with controlNet for SD3. Models are downloaded on first use, ~1.1GB each. Note the control image must already be pre-processed, you can use controlNet in main txt2img tab for this, or external application. Currently trained best at 1024x1024, but this image size isn't enforced. Prompt should agree with controlNet: if using a sitting pose, have 'sitting' in the prompt. controlNets by [instantX](https://huggingface.co/InstantX)
 * added control of 'shift', which is a scaling adjustment to sigmas used internally.
 * added ability to disable any of the text encoders, different results to sending empty prompt. Note the sub-prompt interpretation remains the same as previously described (14/06).
 

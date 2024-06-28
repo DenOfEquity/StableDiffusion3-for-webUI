@@ -468,7 +468,7 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             # 4. Prepare timesteps
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
-            latent_timestep = timesteps[:1].repeat(num_images_per_prompt * num_inference_steps)
+            latent_timestep = timesteps[:1].repeat(num_images_per_prompt)# * num_inference_steps)
 
             # 5. Prepare latent variables
             latents, image_latents, noise = self.prepare_latents(
@@ -525,6 +525,15 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+
+                if doDiffDiff and float((i+1) / self._num_timesteps) <= self._mask_cutoff:# and i > 0 :
+                    tmask = mask >= float((i+1) / self._num_timesteps)
+                    init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
+                    latents = (init_latents_proper * ~tmask) + (latents * tmask)
+
+                if doInPaint and float((i+1) / self._num_timesteps) <= self._mask_cutoff:
+                    init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
+                    latents = (init_latents_proper * (1 - mask)) + (latents * mask)
 
 
                 if float((i+1) / len(timesteps)) > self._guidance_cutoff and self._guidance_scale != 1.0 and self.controlnet == None:
@@ -611,18 +620,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                     negative_pooled_prompt_embeds = callback_outputs.pop(
                         "negative_pooled_prompt_embeds", negative_pooled_prompt_embeds
                     )
-
-                if doDiffDiff and float((i+1) / len(timesteps)) <= self._mask_cutoff:# and i > 0 :
-                    tmask = mask >= float((i+1) / len(timesteps))
-#                    tmask = tmask.repeat((num_images_per_prompt, 16, 1, 1)) #unnecessary
-#                    latents = torch.where(tmask, latents, image_latents)    #identical to calculation below
-                    init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
-                    latents = (init_latents_proper * ~tmask) + (latents * tmask)
-
-                if doInPaint and float((i+1) / len(timesteps)) < self._mask_cutoff:
-                    init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
-                    latents = (init_latents_proper * (1 - mask)) + (latents * mask)
-
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):

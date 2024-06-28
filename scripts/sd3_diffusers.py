@@ -75,7 +75,6 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 # modules/processing.py
-#some of this (CLIPs, T5, zeroNeg) can be wrong, if buttons pushed during generation
 def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, controlNetSettings, state):
     generation_params = {
         "CLIP-L":       '✓' if state[0] else '✗',
@@ -128,8 +127,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         useControlNet = None
 
     if i2iSource != None:
-#        if i2iDenoise < (num_steps + 1) / 1000:
-#            i2iDenoise = (num_steps + 1) / 1000
         if SD3Storage.i2iAllSteps == True:
             num_steps = int(num_steps / i2iDenoise)
 
@@ -784,9 +781,8 @@ def on_ui_tabs():
 
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
-                        with gr.Column():
-                            i2iSource = gr.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                            maskSource = gr.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        i2iSource = gr.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        maskSource = gr.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
                         with gr.Column():
                             with gr.Row():
                                 i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)

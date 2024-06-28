@@ -51,7 +51,7 @@ class SD3Storage:
 #from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
 from diffusers import FlowMatchEulerDiscreteScheduler
 
-from SD3_pipeline import SD3Pipeline_DoE_combined
+from scripts.SD3_pipeline import SD3Pipeline_DoE_combined
 from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
@@ -102,9 +102,16 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_r
     return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}{noise_text}"
 
 def predict(positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, 
-            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, 
+            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, maskSource, maskCutOff, 
             controlNet, controlNetImage, controlNetStrength, controlNetStart, controlNetEnd, 
             *args):
+
+    try:
+        with open('huggingface_access_token.txt', 'r') as file:
+            access_token = file.read().strip()
+    except:
+        print ("SD3: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download models. Local cache will work.")
+        access_token = 0
 
     torch.set_grad_enabled(False)
     
@@ -119,18 +126,22 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     else:
         controlNetStrength = 0.0
         useControlNet = None
-        
 
-    if i2iSource != None and i2iDenoise < 1.0:
-        if i2iDenoise < (num_steps + 1) / 1000:
-            i2iDenoise = (num_steps + 1) / 1000
+    if i2iSource != None:
+#        if i2iDenoise < (num_steps + 1) / 1000:
+#            i2iDenoise = (num_steps + 1) / 1000
         if SD3Storage.i2iAllSteps == True:
             num_steps = int(num_steps / i2iDenoise)
 
         i2iSource = i2iSource.resize((width, height))
     else:
-        i2iSource = None
         i2iDenoise = 1.0
+        maskSource = None
+
+    if maskSource != None:
+        maskSource = maskSource.resize((int(width/8), int(height/8)))
+    else:
+        maskCutOff = 1.0
 
     #   triple prompt, automatic support, no longer needs button to enable
     split_positive = positive_prompt.split('|')
@@ -193,8 +204,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     SD3Storage.lastSeed = fixed_seed
 
     source = "stabilityai/stable-diffusion-3-medium-diffusers"
-    with open('huggingface_access_token.txt', 'r') as file:
-        access_token = file.read().rstrip()
 
     useCachedEmbeds = (SD3Storage.combined_positive == combined_positive and
                        SD3Storage.combined_negative == combined_negative and
@@ -509,12 +518,15 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             latents=latents,
 
             image=i2iSource,
+            mask_image = maskSource,
             strength=i2iDenoise,
 
             control_image=controlNetImage, 
             controlnet_conditioning_scale=controlNetStrength,  
             control_guidance_start=controlNetStart,
             control_guidance_end=controlNetEnd,
+            
+            mask_cutoff = maskCutOff,
 
             joint_attention_kwargs={"scale": SD3Storage.lora_scale }
         ).images
@@ -772,7 +784,9 @@ def on_ui_tabs():
 
                 with gr.Accordion(label='image to image', open=False):
                     with gr.Row():
-                        i2iSource = gr.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gr.Column():
+                            i2iSource = gr.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                            maskSource = gr.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
                         with gr.Column():
                             with gr.Row():
                                 i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
@@ -783,13 +797,14 @@ def on_ui_tabs():
                             with gr.Row():
                                 i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=9)
                                 toPrompt = ToolButton(value='P', variant='secondary')
+                            maskCut = gr.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
                 ctrls = [positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, CFGcutoff, shift, clipskip, steps, sampling_seed,
-                         batch_size, style, i2iSource, i2iDenoise, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
+                         batch_size, style, i2iSource, i2iDenoise, maskSource, maskCut, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None,
+                output_gallery = gr.Gallery(label='Output', height="80vh",
                                             show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does

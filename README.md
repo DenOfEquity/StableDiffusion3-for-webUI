@@ -20,11 +20,15 @@ diffusers>=0.29.1
 ### downloads models on first use - ~5.6GB minimum (~14.4GB including T5 text encoder) ###
 
 ---
-almost current UI screenshot
+current UI screenshot
 
-![](screenshot.png "UI screenshot")
+![](screenshot2.png "UI screenshot")
 
 ---
+#### 28/06/2024 ####
+* added option for mask for image 2 image
+* embiggened gallery
+
 #### 22/06/2024 ####
 * added captioning, in the image2image section. Uses [Florence-2-base](https://huggingface.co/microsoft/Florence-2-base) (faster, lighter than -large, still very good). Use the 'P' toggle button to overwrite the prompt when captions generated. Also captions are written to console. Could add a toggle to use the larger model.
 * added guidance cutoff control - faster processing after cutoff at small-ish quality cost. Not compatible with controlNet, so setting ignored if controlNet active

@@ -402,6 +402,12 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 mult * [control_guidance_end],
             )
 
+        # 0.01 repeat prompt embeds to match num_images_per_prompt
+        prompt_embeds = prompt_embeds.repeat(num_images_per_prompt, 1, 1)
+        negative_prompt_embeds = negative_prompt_embeds.repeat(num_images_per_prompt, 1, 1)
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
+        negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
+        
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             strength,

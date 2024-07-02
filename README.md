@@ -12,7 +12,7 @@ Easiest way to ensure necessary diffusers release is installed is to edit **requ
 diffusers>=0.29.1
 ```
 
-**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You might also need to accept the terms on the [SD3 Hugging Face page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
+**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You will also need to accept the terms on the [SD3 Hugging Face page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
 
 **Do not download the single file models, this extension cannot use them.**
 
@@ -25,6 +25,10 @@ current UI screenshot
 ![](screenshot2.png "UI screenshot")
 
 ---
+#### 02/07/2024 ####
+* fixed issue with changing batch size without changing prompt - prompt caching meant embeds would be wrong size.
+* <sub>Also, wasn't passing batch size to pipeline.</sub>
+
 #### 28/06/2024 ####
 * added option for mask for image 2 image
 * embiggened gallery

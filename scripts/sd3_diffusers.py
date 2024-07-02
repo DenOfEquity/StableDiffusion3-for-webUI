@@ -47,6 +47,8 @@ class SD3Storage:
     redoEmbeds = True
     noiseRGBA = [0.0, 0.0, 0.0, 0.0]
     captionToPrompt = False
+    lora = None
+    lora_scale = 1.0
 
 #from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
 from diffusers import FlowMatchEulerDiscreteScheduler
@@ -240,26 +242,18 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                 token=access_token,
                )
             
-            positive_embeds = text_encoder(positive_input_ids)[0]
-            _, seq_len, _ = positive_embeds.shape
-            positive_embeds = positive_embeds.repeat(1, num_images, 1)
-            positive_embeds_3 = positive_embeds.view(num_images, seq_len, -1)
-            del positive_embeds
+            positive_embeds_3 = text_encoder(positive_input_ids)[0]
 
             if SD3Storage.ZN == True:
-                negative_embeds_3 = torch.zeros((num_images, 512, 4096),    device='cpu', dtype=torch.float16, )
+                negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
             else:
-                negative_embeds = text_encoder(negative_input_ids)[0]
-                _, seq_len, _ = negative_embeds.shape
-                negative_embeds = negative_embeds.repeat(1, num_images, 1)
-                negative_embeds_3 = negative_embeds.view(num_images, seq_len, -1)
-                del negative_embeds
+                negative_embeds_3 = text_encoder(negative_input_ids)[0]
 
             del text_encoder
         else:
             #512 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_3 = torch.zeros((num_images, 512, 4096),    device='cpu', dtype=torch.float16, )
-            negative_embeds_3 = torch.zeros((num_images, 512, 4096),    device='cpu', dtype=torch.float16, )
+            positive_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
+            negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
             #end: T5
 
     #   do first CLIP
@@ -293,38 +287,25 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             text_encoder.to('cuda')
 
             positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
-            pooled_positive_embeds = positive_embeds[0]
-            positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
-            if SD3Storage.ZN != True:
+            pooled_positive_embeds_1 = positive_embeds[0]
+            positive_embeds_1 = positive_embeds.hidden_states[-(clipskip + 2)]
+            del positive_embeds
+            if SD3Storage.ZN == True:
+                negative_embeds_1 = torch.zeros((1, 77, 4096),     device='cuda', dtype=torch.float16, )
+                pooled_negative_embeds_1 = torch.zeros((1, 768),   device='cuda', dtype=torch.float16, )
+            else:
                 negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
-                pooled_negative_embeds = negative_embeds[0]
-                negative_embeds = negative_embeds.hidden_states[-2]
-
+                pooled_negative_embeds_1 = negative_embeds[0]
+                negative_embeds_1 = negative_embeds.hidden_states[-2]
+                del negative_embeds
             del text_encoder
 
-            _, seq_len, _ = positive_embeds.shape
-            positive_embeds = positive_embeds.repeat(1, num_images, 1)
-            positive_embeds_1 = positive_embeds.view(num_images, seq_len, -1)
-            pooled_positive_embeds = pooled_positive_embeds.repeat(1, num_images, 1)
-            pooled_positive_embeds_1 = pooled_positive_embeds.view(num_images, -1)
-            del positive_embeds, pooled_positive_embeds
-
-            if SD3Storage.ZN == True:
-                negative_embeds_1 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
-                pooled_negative_embeds_1 = torch.zeros((num_images, 768),   device='cuda', dtype=torch.float16, )
-            else:
-                _, seq_len, _ = negative_embeds.shape
-                negative_embeds = negative_embeds.repeat(1, num_images, 1)
-                negative_embeds_1 = negative_embeds.view(num_images, seq_len, -1)
-                pooled_negative_embeds = pooled_negative_embeds.repeat(1, num_images, 1)
-                pooled_negative_embeds_1 = pooled_negative_embeds.view(num_images, -1)
-                del negative_embeds, pooled_negative_embeds
         else:
             #77 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_1 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
-            negative_embeds_1 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
-            pooled_positive_embeds_1 = torch.zeros((num_images, 768),   device='cuda', dtype=torch.float16, )
-            pooled_negative_embeds_1 = torch.zeros((num_images, 768),   device='cuda', dtype=torch.float16, )
+            positive_embeds_1 = torch.zeros((1, 77, 4096),     device='cuda', dtype=torch.float16, )
+            negative_embeds_1 = torch.zeros((1, 77, 4096),     device='cuda', dtype=torch.float16, )
+            pooled_positive_embeds_1 = torch.zeros((1, 768),   device='cuda', dtype=torch.float16, )
+            pooled_negative_embeds_1 = torch.zeros((1, 768),   device='cuda', dtype=torch.float16, )
 
     #   do second CLIP
         if SD3Storage.CG == True:
@@ -357,38 +338,26 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             text_encoder.to('cuda')
 
             positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
-            pooled_positive_embeds = positive_embeds[0]
-            positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
-            if SD3Storage.ZN != True:
+            pooled_positive_embeds_2 = positive_embeds[0]
+            positive_embeds_2 = positive_embeds.hidden_states[-(clipskip + 2)]
+            del positive_embeds
+            if SD3Storage.ZN == True:
+                negative_embeds_2 = torch.zeros((1, 77, 4096),     device='cuda', dtype=torch.float16, )
+                pooled_negative_embeds_2 = torch.zeros((1, 1280),  device='cuda', dtype=torch.float16, )
+            else:
                 negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
-                pooled_negative_embeds = negative_embeds[0]
-                negative_embeds = negative_embeds.hidden_states[-2]
-
+                pooled_negative_embeds_2 = negative_embeds[0]
+                negative_embeds_2 = negative_embeds.hidden_states[-2]
+                del negative_embeds
             del text_encoder
 
-            _, seq_len, _ = positive_embeds.shape
-            positive_embeds = positive_embeds.repeat(1, num_images, 1)
-            positive_embeds_2 = positive_embeds.view(num_images, seq_len, -1)
-            pooled_positive_embeds = pooled_positive_embeds.repeat(1, num_images, 1)
-            pooled_positive_embeds_2 = pooled_positive_embeds.view(num_images, -1)
-            del positive_embeds, pooled_positive_embeds
 
-            if SD3Storage.ZN == True:
-                negative_embeds_2 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
-                pooled_negative_embeds_2 = torch.zeros((num_images, 1280),  device='cuda', dtype=torch.float16, )
-            else:
-                _, seq_len, _ = negative_embeds.shape
-                negative_embeds = negative_embeds.repeat(1, num_images, 1)
-                negative_embeds_2 = negative_embeds.view(num_images, seq_len, -1)
-                pooled_negative_embeds = pooled_negative_embeds.repeat(1, num_images, 1)
-                pooled_negative_embeds_2 = pooled_negative_embeds.view(num_images, -1)
-                del negative_embeds, pooled_negative_embeds
         else:
             #77 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_2 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
-            negative_embeds_2 = torch.zeros((num_images, 77, 4096),     device='cuda', dtype=torch.float16, )
-            pooled_positive_embeds_2 = torch.zeros((num_images, 1280),  device='cuda', dtype=torch.float16, )
-            pooled_negative_embeds_2 = torch.zeros((num_images, 1280),  device='cuda', dtype=torch.float16, )
+            positive_embeds_2 = torch.zeros((1, 77, 4096),     device='cuda', dtype=torch.float16, )
+            negative_embeds_2 = torch.zeros((1, 77, 4096),     device='cuda', dtype=torch.float16, )
+            pooled_positive_embeds_2 = torch.zeros((1, 1280),  device='cuda', dtype=torch.float16, )
+            pooled_negative_embeds_2 = torch.zeros((1, 1280),  device='cuda', dtype=torch.float16, )
 
         #merge
         clip_positive_embeds = torch.cat([positive_embeds_1, positive_embeds_2], dim=-1)
@@ -481,8 +450,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 
 #   load in LoRA, weight passed to pipe
-
-    if SD3Storage.lora != "(None)":
+    if SD3Storage.lora and SD3Storage.lora != "(None)" and SD3Storage.lora_scale != 0.0:
         lorafile = ".//models/diffusers//SD3Lora//" + SD3Storage.lora + ".safetensors"
         try:
             pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
@@ -510,6 +478,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             negative_prompt_embeds=SD3Storage.negative_embeds.to('cuda'),
             pooled_prompt_embeds=SD3Storage.positive_pooled.to('cuda'),
             negative_pooled_prompt_embeds=SD3Storage.negative_pooled.to('cuda'),
+            num_images_per_prompt=num_images,
             output_type="pil",
             generator=generator,
             latents=latents,
@@ -835,8 +804,8 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button])
         generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])
+        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button])
 
     return [(sd3_block, "StableDiffusion3", "sd3")]
 

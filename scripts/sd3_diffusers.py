@@ -194,7 +194,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     combined_positive = positive_prompt_1 + " |\n"
     combined_positive += ("[repeat 1]" if positive_prompt_2 == positive_prompt_1 else positive_prompt_2) + " |\n"
     combined_positive += ("[repeat 1]" if positive_prompt_3 == positive_prompt_1 else ("[repeat 2]" if positive_prompt_3 == positive_prompt_2 else positive_prompt_3))
-    combined_negative = negative_prompt_1 + " |\n" + negative_prompt_2 + " |\n" + negative_prompt_3
+    combined_negative = negative_prompt_1 + " |\n"
+    combined_negative += ("[repeat 1]" if negative_prompt_2 == negative_prompt_1 else negative_prompt_2) + " |\n"
+    combined_negative += ("[repeat 1]" if negative_prompt_3 == negative_prompt_1 else ("[repeat 2]" if negative_prompt_3 == negative_prompt_2 else negative_prompt_3))
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -421,7 +423,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         int(width) // pipe.vae_scale_factor,
     )
 
-    latents = randn_tensor(shape, generator=generator, dtype=torch.float16).to('cuda').to(torch.float16)
+    latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
     #   colour the initial noise
     if SD3Storage.noiseRGBA[3] != 0.0:
         nr = SD3Storage.noiseRGBA[0] ** 0.5
@@ -467,6 +469,10 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
     pipe.transformer.to(memory_format=torch.channels_last)
     pipe.vae.to(memory_format=torch.channels_last)
+
+#    #   reset the generator
+#    del generator
+#    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
 
     with torch.inference_mode():
         output = pipe(
@@ -590,9 +596,9 @@ def on_ui_tabs():
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports): #workaround for unnecessary flash_attn requirement
             model = AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-base', 
                                                          attn_implementation="sdpa", 
-                                                         torch_dtype=torch.float32, 
+                                                         torch_dtype=torch.float16, 
                                                          cache_dir=".//models//diffusers//", 
-                                                         trust_remote_code=True)
+                                                         trust_remote_code=True).to('cuda')
         processor = AutoProcessor.from_pretrained('microsoft/Florence-2-base', #-large
                                                   torch_dtype=torch.float32, 
                                                   cache_dir=".//models//diffusers//", 
@@ -603,6 +609,7 @@ def on_ui_tabs():
 
         for p in prompts:
             inputs = processor(text=p, images=image, return_tensors="pt")
+            inputs.to('cuda').to(torch.float16)
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
@@ -617,9 +624,9 @@ def on_ui_tabs():
             del generated_text
             print (parsed_answer)
             result += parsed_answer[p]
+            del parsed_answer
             if p != prompts[-1]:
                 result += ' | \n'
-            del parsed_answer
 
         del model, processor
 
@@ -699,7 +706,9 @@ def on_ui_tabs():
                     CG = ToolButton(value='CG', variant='primary',   tooltip='use CLIP-G text encoder for positive')
                     T5 = ToolButton(value='T5', variant='secondary', tooltip='use T5 text encoder for positive')
                     ZN = ToolButton(value='ZN', variant='secondary', tooltip='zero out negative embeds')
-                positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                with gr.Row():
+                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                    clipskip = gr.Number(label='Clip skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
                 with gr.Row():
                     negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=1.01)
                     randNeg = ToolButton(value='rng', variant='secondary', tooltip='random negative')
@@ -715,22 +724,21 @@ def on_ui_tabs():
                                         label='Quickset', type='index', scale=0)
 
                 with gr.Row():
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=2)
+                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=1)
                     CFGrescale = gr.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
                     CFGcutoff = gr.Slider(label='CFG cutoff step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
                     shift = gr.Slider(label='Shift', minimum=1.0, maximum=8.0, step=0.1, value=3.0, scale=1)
-                with gr.Row():
+                with gr.Row(equal_height=True):
                     steps = gr.Slider(label='Steps', minimum=1, maximum=80, step=1, value=20, scale=2)
-                    clipskip = gr.Slider(label='Clip skip', minimum=0, maximum=8, step=1, value=0, scale=1) #use webUI setting instead?
                     sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=0)
-                    random = ToolButton(value='\U0001f3b2\ufe0f')
-                    reuseSeed = ToolButton(value='\u267b\ufe0f')
-                    batch_size = gr.Number(label='Batch size', minimum=1, maximum=9, value=1, precision=1, scale=0)
+                    random = ToolButton(value="\U0001f3b2\ufe0f")
+                    reuseSeed = ToolButton(value="\u267b\ufe0f")
+                    batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
 
                 with gr.Row(equal_height=True):
                     lora = gr.Dropdown([x for x in loras], label='LoRA', value="(None)", type='value', multiselect=False, scale=1)
                     refresh = ToolButton(value='\U0001f504')
-                    scale = gr.Slider(label='LoRA weight', minimum=-1.0, maximum=1.0, value=1.0, step=0.01)
+                    scale = gr.Slider(label='LoRA weight', minimum=-1.0, maximum=1.0, value=1.0, step=0.01, scale=1)
 
                 with gr.Accordion(label='the colour of noise', open=False):
                     with gr.Row():

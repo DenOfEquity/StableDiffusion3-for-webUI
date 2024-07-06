@@ -20,11 +20,18 @@ diffusers>=0.29.1
 ### downloads models on first use - ~5.6GB minimum (~14.4GB including T5 text encoder) ###
 
 ---
-current UI screenshot
+almost current UI screenshot
 
 ![](screenshot2.png "UI screenshot")
 
 ---
+#### 05/07/2024 ####
+* guidance cutoff now works with controlNet too.
+* (clip skip seems mostly useless, likely to remove in future)
+
+#### 03/07/2024 ####
+* tweaked Florence-2: model now runs on GPU so is faster.
+
 #### 02/07/2024 ####
 * fixed issue with changing batch size without changing prompt - prompt caching meant embeds would be wrong size.
 * <sub>Also, wasn't passing batch size to pipeline.</sub>
@@ -35,7 +42,7 @@ current UI screenshot
 
 #### 22/06/2024 ####
 * added captioning, in the image2image section. Uses [Florence-2-base](https://huggingface.co/microsoft/Florence-2-base) (faster, lighter than -large, still very good). Use the 'P' toggle button to overwrite the prompt when captions generated. Also captions are written to console. Could add a toggle to use the larger model.
-* added guidance cutoff control - faster processing after cutoff at small-ish quality cost. Not compatible with controlNet, so setting ignored if controlNet active
+* added guidance cutoff control - faster processing after cutoff at small-ish quality cost. ~~Not compatible with controlNet, so setting ignored if controlNet active.~~
 * ZN toggle zeroes out the negative text embeds, different result to encoding an empty prompt. Experimental, might tend to oversaturate.
 * 'rng' button generates some random alphanumerics for the negative prompt. SD3 doesn't seem to respect the negative much, so random characters can be used for tweaking outputs.
 
@@ -82,7 +89,7 @@ current UI screenshot
 #### 12/06/2024 ####
 * rough first implementation, based on my other extensions
 * my PixArt/Hunyuan i2i method doesn't work here, but there is a diffusers pipeline for it so I should be able to hack the necessary out of that
-* T5 button toggles usage of the big text encoder, off by default - don't enable if you only have 8GB VRAM, it will fail.
+* T5 button toggles usage of the big text encoder, off by default - ~~don't enable if you only have 8GB VRAM, it will fail~~.
 * T5 with 8GB VRAM probably can work if I handle it manually (which means handling all 3 tokenizers and 3 text encoders manually).
 * last used prompt embeds are cached, will be reused if the prompts don't change (toggling T5 button deletes the cache)
 * no sampler selection as it seems only the default one works

@@ -402,12 +402,14 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 mult * [control_guidance_end],
             )
 
+
         # 0.01 repeat prompt embeds to match num_images_per_prompt
         prompt_embeds = prompt_embeds.repeat(num_images_per_prompt, 1, 1)
         negative_prompt_embeds = negative_prompt_embeds.repeat(num_images_per_prompt, 1, 1)
         pooled_prompt_embeds = pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
         negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
         
+
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             strength,
@@ -494,13 +496,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 mask = self.mask_processor.preprocess(mask_image).to(device='cuda', dtype=torch.float16)
 #                mask = mask.repeat(num_images_per_prompt, 1, 1, 1)  #necessary?
 
-##  diff-diff method:
-##  resize mask /8 (pre done)
-##  each step, threshold mask by step/num_steps
-##  lerp latents and image_latents by thresholded mask
-##  tmask = mask > float(i / len(timesteps)
-##  latents = (init_latents_proper * (1 - tmask)) + (latents * tmask)
-
 
 ####    with real inpaint model:
 ####                mask_condition = self.mask_processor.preprocess(mask_image)
@@ -542,21 +537,18 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                     latents = (init_latents_proper * (1 - mask)) + (latents * mask)
 
 
-                if float((i+1) / len(timesteps)) > self._guidance_cutoff and self._guidance_scale != 1.0 and self.controlnet == None:
-                    # something else is wrong size for controlnet, but not anything that gets sent to controlnet from here.
-                    # something in controlnet init? but that is too early.. control_image.parameters?
+                if float((i+1) / len(timesteps)) > self._guidance_cutoff and self._guidance_scale != 1.0:
                     self._guidance_scale = 1.0
                     prompt_embeds = prompt_embeds[1]
                     pooled_prompt_embeds = pooled_prompt_embeds[1]
                     if self.controlnet != None:
                         controlnet_pooled_projections = controlnet_pooled_projections[1]
-                        control_image = control_image[1]
+                        control_image = control_image[1].unsqueeze(0)
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-
 
                 ####    would be used by real inpainting model
 ####                if doInPaint:
@@ -608,7 +600,7 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-
+                
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
                         # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272

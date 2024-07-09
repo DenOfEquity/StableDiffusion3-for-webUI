@@ -25,6 +25,10 @@ almost current UI screenshot
 ![](screenshot2.png "UI screenshot")
 
 ---
+#### 09/07/2024 ####
+* some code cleanups
+* added prompt parsing to automatically fill in details like seed, steps, etc.
+
 #### 05/07/2024 ####
 * guidance cutoff now works with controlNet too.
 * (clip skip seems mostly useless, likely to remove in future)

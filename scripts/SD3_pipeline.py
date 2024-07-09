@@ -64,7 +64,7 @@ def retrieve_latents(
         raise AttributeError("Could not access latents of provided encoder_output")
 
 
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
+# Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,                                              # (`SchedulerMixin`): scheduler to get timesteps from.
     num_inference_steps: Optional[int] = None,              # (`int`):            number of diffusion steps used  - priority 3
@@ -164,8 +164,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             else 128
         )
 
-
-
     def check_inputs(
         self,
         strength,
@@ -263,10 +261,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
     @property
     def guidance_scale(self):
         return self._guidance_scale
-
-    @property
-    def clip_skip(self):
-        return self._clip_skip
 
     #   controlnet
     def prepare_image(
@@ -372,7 +366,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
 
@@ -424,7 +417,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         self._guidance_rescale = guidance_rescale
         self._guidance_cutoff = guidance_cutoff
         self._mask_cutoff = mask_cutoff
-        self._clip_skip = clip_skip
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
 
@@ -606,6 +598,8 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                         # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                         latents = latents.to(latents_dtype)
 
+                ### interrupt ?
+
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
@@ -626,13 +620,11 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 if XLA_AVAILABLE:
                     xm.mark_step()
 
-        if doInPaint:
-            if mask_image is not None and 1.0 <= self._mask_cutoff:
-                latents = (image_latents * (1 - mask)) + (latents * mask)
+        if doInPaint and 1.0 <= self._mask_cutoff:
+            latents = (image_latents * (1 - mask)) + (latents * mask)
 
         if output_type == "latent":
             image = latents
-
         else:
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 

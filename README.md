@@ -25,6 +25,9 @@ almost current UI screenshot
 ![](screenshot2.png "UI screenshot")
 
 ---
+#### 10/07/2024 ####
+* improved yesterday's effort. More compatibility, multi-line, etc.
+
 #### 09/07/2024 ####
 * some code cleanups
 * added prompt parsing to automatically fill in details like seed, steps, etc.

@@ -60,10 +60,6 @@ def quote(text):
 # modules/processing.py
 def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, controlNetSettings):
     generation_params = {
-        "CLIP-L":       '✓' if SD3Storage.CL else '✗',
-        "CLIP-G":       '✓' if SD3Storage.CG else '✗',
-        "T5":           '✓' if SD3Storage.T5 else '✗', #2713, 2717
-        "zero negative":'✓' if SD3Storage.ZN else '✗',
         "Size": f"{width}x{height}",
         "Seed": seed,
         "Steps": steps,
@@ -72,6 +68,10 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_r
         "Clip skip": f"{clipskip}",
         "RNG": opts.randn_source if opts.randn_source != "GPU" else None,
         "controlNet": controlNetSettings,
+        "CLIP-L":       '✓' if SD3Storage.CL else '✗',
+        "CLIP-G":       '✓' if SD3Storage.CG else '✗',
+        "T5":           '✓' if SD3Storage.T5 else '✗', #2713, 2717
+        "zero negative":'✓' if SD3Storage.ZN else '✗',
     }
 #add loras list and scales
 
@@ -151,10 +151,10 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         negative_prompt_2 = styles.styles_list[style][2] + negative_prompt_2
         negative_prompt_3 = styles.styles_list[style][2] + negative_prompt_3
 
-    combined_positive = positive_prompt_1 + " | " + positive_prompt_2 + " | " + positive_prompt_3
+    combined_positive = positive_prompt_1 + " | \n" + positive_prompt_2 + " | \n" + positive_prompt_3
 #    combined_positive += ("[repeat 1]" if positive_prompt_2 == positive_prompt_1 else positive_prompt_2) + " |\n"
 #    combined_positive += ("[repeat 1]" if positive_prompt_3 == positive_prompt_1 else ("[repeat 2]" if positive_prompt_3 == positive_prompt_2 else positive_prompt_3))
-    combined_negative = negative_prompt_1 + " | " + negative_prompt_2 + " | " + negative_prompt_3
+    combined_negative = negative_prompt_1 + " | \n" + negative_prompt_2 + " | \n" + negative_prompt_3
 #    combined_negative += ("[repeat 1]" if negative_prompt_2 == negative_prompt_1 else negative_prompt_2) + " |\n"
 #    combined_negative += ("[repeat 1]" if negative_prompt_3 == negative_prompt_1 else ("[repeat 2]" if negative_prompt_3 == negative_prompt_2 else negative_prompt_3))
 
@@ -609,18 +609,54 @@ def on_ui_tabs():
 
     def parsePrompt (positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns):
         p = positive.split('\n')
+        lineCount = len(p)
+
+        negative = ''
         
-        for l in range(len(p)):
-            if "Prompt: " == str(p[l][0:8]):
-                positive = str(p[l][8:])
-            elif "Prompt" == p[l]:
-                positive = p[l+1]
+        if "Prompt" != p[0] and "Prompt: " != p[0][0:8]:               #   civitAI style special case
+            positive = p[0]
+            l = 1
+            while (l < lineCount) and not (p[l][0:17] == "Negative prompt: " or p[l][0:7] == "Steps: "):
+                if p[l] != '':
+                    positive += '\n' + p[l]
                 l += 1
-            elif "Negative: " == str(p[l][0:10]):
-                negative = str(p[l][10:])
-            elif "Negative Prompt" == p[l]:
-                negative = p[l+1]
+        
+        for l in range(lineCount):
+            if "Prompt" == p[l][0:6]:
+                if ": " == p[l][6:8]:                                   #   mine
+                    positive = str(p[l][8:])
+                    c = 1
+                elif "Prompt" == p[l] and (l+1 < lineCount):            #   webUI
+                    positive = p[l+1]
+                    c = 2
+                else:
+                    continue
+
+                while (l+c < lineCount) and not (p[l+c][0:10] == "Negative: " or p[l+c][0:15] == "Negative Prompt" or p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                    if p[l+c] != '':
+                        positive += '\n' + p[l+c]
+                    c += 1
                 l += 1
+
+            elif "Negative" == p[l][0:8]:
+                if ": " == p[l][8:10]:                                  #   mine
+                    negative = str(p[l][10:])
+                    c = 1
+                elif " prompt: " == p[l][8:17]:                         #   civitAI
+                    negative = str(p[l][17:])
+                    c = 1
+                elif " Prompt" == p[l][8:15] and (l+1 < lineCount):     #   webUI
+                    negative = p[l+1]
+                    c = 2
+                else:
+                    continue
+                
+                while (l+c < lineCount) and not (p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                    if p[l+c] != '':
+                        negative += '\n' + p[l+c]
+                    c += 1
+                l += 1
+
             elif "Initial noise: " == str(p[l][0:15]):
                 noiseRGBA = str(p[l][16:-1]).split(',')
                 nr = float(noiseRGBA[0])
@@ -631,27 +667,32 @@ def on_ui_tabs():
                 params = p[l].split(',')
                 for k in range(len(params)):
                     pairs = params[k].strip().split(' ')        #split on ':' instead?
-                    attribute = pairs[0]
-                    if "Size:" == attribute:
-                        size = pairs[1].split('x')
-                        width = int(size[0])
-                        height = int(size[1])
-                    elif "Seed:" == attribute:
-                        seed = int(pairs[1])
-                    elif "Steps(Prior/Decoder):" == attribute:
-                        steps = str(pairs[1]).split('/')
-                        steps = int(steps[0])
-                    elif "Steps:" == attribute:
-                        steps = int(pairs[1])
-                    elif "CFG" == attribute and "scale:" == pairs[1]:
-                        CFG = float(pairs[2])
-                    elif "CFG:" == attribute:
-                        CFG = float(pairs[1])
-                        if len(pairs) == 4:
-                            CFGrescale = float(pairs[2])
-                            CFGcutoff = float(pairs[3])
-                    elif "Shift:" == attribute:
-                        shift = float(pairs[1])
+                    match pairs[0]:
+                        case "Size:":
+                            size = pairs[1].split('x')
+                            width = int(size[0])
+                            height = int(size[1])
+                        case "Seed:":
+                            seed = int(pairs[1])
+                        case "Steps(Prior/Decoder):":
+                            steps = str(pairs[1]).split('/')
+                            steps = int(steps[0])
+                        case "Steps:":
+                            steps = int(pairs[1])
+                        case "CFG":
+                            if "scale:" == pairs[1]:
+                                CFG = float(pairs[2])
+                        case "CFG:":
+                            CFG = float(pairs[1])
+                            if len(pairs) == 4:
+                                CFGrescale = float(pairs[2].strip('\(\)'))
+                                CFGcutoff = float(pairs[3].strip('\[\]'))
+                        case "Shift:":
+                            shift = float(pairs[1])
+                        case "width:":
+                            width = float(pairs[1])
+                        case "height:":
+                            height = float(pairs[1])                    #clipskip?
         return positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns
 
 

@@ -143,14 +143,19 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     positive_prompt_1, positive_prompt_2, positive_prompt_3 = promptSplit (positive_prompt)
     negative_prompt_1, negative_prompt_2, negative_prompt_3 = promptSplit (negative_prompt)
         
-    if style != 0:
-        positive_prompt_1 = styles.styles_list[style][1].replace("{prompt}", positive_prompt_1)
-        positive_prompt_2 = styles.styles_list[style][1].replace("{prompt}", positive_prompt_2)
-        positive_prompt_3 = styles.styles_list[style][1].replace("{prompt}", positive_prompt_3)
-        negative_prompt_1 = styles.styles_list[style][2] + negative_prompt_1
-        negative_prompt_2 = styles.styles_list[style][2] + negative_prompt_2
-        negative_prompt_3 = styles.styles_list[style][2] + negative_prompt_3
-
+    for s in style:
+        k = 0;
+        while styles.styles_list[k][0] != s:
+            k += 1
+        if "{prompt}" in styles.styles_list[k][1]:
+            positive_prompt_1 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_1)
+            positive_prompt_2 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_2)
+            positive_prompt_3 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_3)
+        else:
+            positive_prompt_1 += styles.styles_list[k][1]
+            positive_prompt_2 += styles.styles_list[k][1]
+            positive_prompt_3 += styles.styles_list[k][1]
+            
     combined_positive = positive_prompt_1 + " | \n" + positive_prompt_2 + " | \n" + positive_prompt_3
 #    combined_positive += ("[repeat 1]" if positive_prompt_2 == positive_prompt_1 else positive_prompt_2) + " |\n"
 #    combined_positive += ("[repeat 1]" if positive_prompt_3 == positive_prompt_1 else ("[repeat 2]" if positive_prompt_3 == positive_prompt_2 else positive_prompt_3))
@@ -326,8 +331,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     pipe.enable_model_cpu_offload() #   implies .to('cuda') as necessary
     pipe.vae.enable_slicing()       #   tiling works once only?
 
-    #   always generate the noise here
-    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     shape = (
         num_images,
         pipe.transformer.config.in_channels,
@@ -335,7 +338,13 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         int(width) // pipe.vae_scale_factor,
     )
 
+    #   always generate the noise here
+    generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
+    #regen the generator otherwise results between batch/single will be different
+    del generator
+    generator = torch.Generator(device='cpu').manual_seed(fixed_seed)
+
     #   colour the initial noise
     if SD3Storage.noiseRGBA[3] != 0.0:
         nr = SD3Storage.noiseRGBA[0] ** 0.5
@@ -361,6 +370,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
         del imageR, imageG, imageB, image, image_latents
     #   end: colour the initial noise
+
 
 
 #   load in LoRA, weight passed to pipe
@@ -692,27 +702,67 @@ def on_ui_tabs():
                         case "width:":
                             width = float(pairs[1])
                         case "height:":
-                            height = float(pairs[1])                    #clipskip?
+                            height = float(pairs[1])
+                        #clipskip?
         return positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns
+
+    def style2prompt (prompt, style):
+        splitPrompt = prompt.split('|')
+        newPrompt = ''
+        for p in splitPrompt:
+            subprompt = p.strip()
+            for s in style:
+                #get index from value, working around possible gradio bug
+                k = 0;
+                while styles.styles_list[k][0] != s:
+                    k += 1
+                if "{prompt}" in styles.styles_list[k][1]:
+                    subprompt = styles.styles_list[k][1].replace("{prompt}", subprompt)
+                else:
+                    subprompt += styles.styles_list[k][1]
+            newPrompt += subprompt
+            if p != splitPrompt[-1]:
+                newPrompt += ' |\n'
+        return newPrompt, []
+
+
+    def refreshStyles (style):
+        from importlib import reload
+        reload(styles)
+        
+        newList = [x[0] for x in styles.styles_list]
+        newStyle = []
+        
+        for s in style:
+            if s in newList:
+                newStyle.append(s)
+
+        return gr.Dropdown.update(choices=newList, value=newStyle)
 
 
     with gr.Blocks() as sd3_block:
         with ResizeHandleRow():
             with gr.Column():
+#                with gr.Row():
+#                    LFO = ToolButton(value='lfo', variant='secondary', tooltip='local files only')
                 with gr.Row():
-                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
+                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
                     CL = ToolButton(value='CL', variant='primary',   tooltip='use CLIP-L text encoder')
                     CG = ToolButton(value='CG', variant='primary',   tooltip='use CLIP-G text encoder')
                     T5 = ToolButton(value='T5', variant='secondary', tooltip='use T5 text encoder')
                     ZN = ToolButton(value='ZN', variant='secondary', tooltip='zero out negative embeds')
-                    LFO = ToolButton(value='lfo', variant='secondary', tooltip='local files only')
-                with gr.Row():
-                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
-                    clipskip = gr.Number(label='Clip skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
                 with gr.Row():
                     negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=1.01)
                     randNeg = ToolButton(value='rng', variant='secondary', tooltip='random negative')
-                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value='(None)', type='index', scale=0)
+                    clipskip = gr.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
+
+                with gr.Row():
+                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value=None, type='value', multiselect=True)
+                    strfh = ToolButton(value="🔄", variant='secondary', tooltip='reload styles')
+                    st2pr = ToolButton(value="📋", variant='secondary', tooltip='add style to prompt')
+#make infotext from all settings, send to clipboard?
+                    nouse = ToolButton(value="️", variant='tertiary', tooltip='', interactive=False)
+                    parse = ToolButton(value="↙️", variant='secondary', tooltip='parse')
 
                 with gr.Row():
                     width = gr.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
@@ -790,7 +840,9 @@ def on_ui_tabs():
                         source_text_component=positive_prompt,
                         source_image_component=output_gallery,
                     ))
-
+                    
+        strfh.click(refreshStyles, inputs=[style], outputs=[style])
+        st2pr.click(style2prompt, inputs=[positive_prompt, style], outputs=[positive_prompt, style])
         parse.click(parsePrompt, inputs=parseable, outputs=parseable, show_progress=False)
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
         refresh.click(refreshLoRAs, inputs=[], outputs=[lora])
@@ -799,7 +851,7 @@ def on_ui_tabs():
         T5.click(toggleT5, inputs=[], outputs=T5)
         ZN.click(toggleZN, inputs=[], outputs=ZN)
         AS.click(toggleAS, inputs=[], outputs=AS)
-        LFO.click(toggleLFO, inputs=[], outputs=LFO)
+#        LFO.click(toggleLFO, inputs=[], outputs=LFO)
         swapper.click(fn=None, _js="function(){switchWidthHeight('StableDiffusion3')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)

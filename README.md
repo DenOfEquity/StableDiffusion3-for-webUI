@@ -25,6 +25,10 @@ almost current UI screenshot
 ![](screenshot2.png "UI screenshot")
 
 ---
+
+#### 13/07/2024 ####
+* reworked styles. Negatives removed; multi-select enabled; new options added, generally short and suitable for combining. Will aim to add more over time.
+
 #### 10/07/2024 ####
 * improved yesterday's effort. More compatibility, multi-line, etc.
 

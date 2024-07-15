@@ -50,20 +50,6 @@ else:
 #logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
-def retrieve_latents(
-    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
-):
-    if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
-        return encoder_output.latent_dist.sample(generator)
-    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
-        return encoder_output.latent_dist.mode()
-    elif hasattr(encoder_output, "latents"):
-        return encoder_output.latents
-    else:
-        raise AttributeError("Could not access latents of provided encoder_output")
-
-
 # Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,                                              # (`SchedulerMixin`): scheduler to get timesteps from.
@@ -201,62 +187,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 
         return timesteps, num_inference_steps - t_start
 
-    def prepare_latents(self, image, noise, timestep, strength, num_images_per_prompt, dtype, device, generator=None):
-        if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
-            raise ValueError(
-                f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
-            )
-
-        image = image.to(device=device, dtype=dtype)
-        batch_size = num_images_per_prompt
-
-        if image.shape[1] == self.vae.config.latent_channels:
-            init_latents = image
-        else:
-            if isinstance(generator, list) and len(generator) != batch_size:
-                raise ValueError(
-                    f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                    f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-                )
-
-            elif isinstance(generator, list):
-                init_latents = [
-                    retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
-                    for i in range(batch_size)
-                ]
-                init_latents = torch.cat(init_latents, dim=0)
-            else:
-                init_latents = retrieve_latents(self.vae.encode(image), generator=generator)
-
-            init_latents = (init_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-
-        if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
-            # expand init_latents for batch_size
-            additional_image_per_prompt = batch_size // init_latents.shape[0]
-            init_latents = torch.cat([init_latents] * additional_image_per_prompt, dim=0)
-        elif batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] != 0:
-            raise ValueError (f"Cannot duplicate `image` of batch size {init_latents.shape[0]} to {batch_size} text prompts.")
-        else:
-            init_latents = torch.cat([init_latents], dim=0)
-
-        shape = init_latents.shape
-        latents_image = init_latents
-
-        if noise == None:
-            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        elif noise.shape != shape:
-            #why not just regenerate?
-            raise ValueError (f"Provided noise latents have incorrect shape {noise.shape}, expected {shape}.")
-
-        # get latents
-        if strength == 1.0: #   not convinced by this, but probably exactly the same
-            init_latents = noise
-        else:
-            init_latents = self.scheduler.scale_noise(init_latents, timestep, noise)
-
-        latents = init_latents.to(device=device, dtype=dtype)
-
-        return latents, latents_image.to(device=device, dtype=dtype), noise.to(device=device, dtype=dtype)
 
     @property
     def guidance_scale(self):
@@ -352,6 +282,7 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         image: PipelineImageInput = None,
         mask_image: PipelineImageInput = None,
         strength: float = 0.6,
+        mask_cutoff: float = 1.0,
         num_inference_steps: int = 50,
         timesteps: List[int] = None,
         guidance_scale: float = 7.0,
@@ -375,7 +306,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         controlnet_conditioning_scale: Union[float, List[float]] = 1.0,
         controlnet_pooled_projections: Optional[torch.FloatTensor] = None,
 
-        mask_cutoff: float = 1.0,
 
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ):
@@ -414,8 +344,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         )
 
         self._guidance_scale = guidance_scale
-        self._guidance_rescale = guidance_rescale
-        self._guidance_cutoff = guidance_cutoff
         self._mask_cutoff = mask_cutoff
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
@@ -460,27 +388,27 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             else:
                 controlnet_pooled_projections = controlnet_pooled_projections or pooled_prompt_embeds
 
+        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
         if image is not None:
-            # 3. Preprocess image
-            image = self.image_processor.preprocess(image)
+            noise = latents
 
             # 4. Prepare timesteps
-            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
             timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
-            latent_timestep = timesteps[:1].repeat(num_images_per_prompt)# * num_inference_steps)
 
-            # 5. Prepare latent variables
-            latents, image_latents, noise = self.prepare_latents(
-                image,
-                latents,
-                latent_timestep,
-                strength, 
-                num_images_per_prompt,
-                prompt_embeds.dtype,
-                device,
-                generator,
-            )
+            # 3. Preprocess image
+            image = self.image_processor.preprocess(image).to(device='cuda', dtype=torch.float16)
+            image_latents = self.vae.encode(image).latent_dist.sample(generator)
+            image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+            image_latents = image_latents.repeat(num_images_per_prompt, 1, 1, 1)
+
+            if strength < 1.0:
+                latent_timestep = timesteps[:1].repeat(num_images_per_prompt)# * num_inference_steps)
+                latents = self.scheduler.scale_noise(image_latents, latent_timestep, noise)
+
+            latents = latents.to(device='cuda', dtype=torch.float16)
+            image_latents = image_latents.to(device='cuda', dtype=torch.float16)
+            noise = noise.to(device='cuda', dtype=torch.float16)
 
             if mask_image is not None:
                 # 5.1. Prepare masked latent variables
@@ -496,8 +424,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 ####                mask_condition, masked_image,
 ####                num_images_per_prompt,
 ####                prompt_embeds.dtype, device, generator )                
-        else:
-            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
         # 6a. Create tensor stating which controlnets to keep
         #is this necessary? why not use start/end directly?
@@ -528,14 +454,13 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                     init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
                     latents = (init_latents_proper * (1 - mask)) + (latents * mask)
 
-
-                if float((i+1) / len(timesteps)) > self._guidance_cutoff and self._guidance_scale != 1.0:
+                if float((i+1) / len(timesteps)) > guidance_cutoff and self._guidance_scale != 1.0:
                     self._guidance_scale = 1.0
-                    prompt_embeds = prompt_embeds[1]
-                    pooled_prompt_embeds = pooled_prompt_embeds[1]
+                    prompt_embeds = prompt_embeds[num_images_per_prompt:]
+                    pooled_prompt_embeds = pooled_prompt_embeds[num_images_per_prompt:]
                     if self.controlnet != None:
-                        controlnet_pooled_projections = controlnet_pooled_projections[1]
-                        control_image = control_image[1].unsqueeze(0)
+                        controlnet_pooled_projections = controlnet_pooled_projections[num_images_per_prompt:]
+                        control_image = control_image[num_images_per_prompt:]
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents

@@ -137,7 +137,7 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, vae_latent_channels=self.latent_channels)
         self.mask_processor  = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, vae_latent_channels=self.vae.config.latent_channels, 
-                                                 do_normalize=False, do_binarize=False, do_convert_grayscale=True)
+                                                 do_resize=False, do_normalize=False, do_binarize=False, do_convert_grayscale=True)
 
 #        self.tokenizer_max_length = (
 #            self.tokenizer.model_max_length

@@ -460,9 +460,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 
 def on_ui_tabs():
-    from importlib import reload
-    reload(styles)
-    reload(pipeline)
+#    from importlib import reload
+#    reload(styles)
+#    reload(pipeline)
 
     def buildLoRAList ():
         loras = ["(None)"]

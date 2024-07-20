@@ -12,7 +12,6 @@ Easiest way to ensure necessary diffusers release is installed is to edit **requ
 diffusers>=0.29.1
 transformers>=4.40
 tokenizers>=0.19
-huggingface-hub>=0.23.4
 ```
 
 **Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You will also need to accept the terms on the [SD3 Hugging Face page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).

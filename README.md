@@ -1,6 +1,6 @@
 ## StableDiffusion3 for Forge webui ##
 I don't think there is anything Forge specific here. But A1111 has native support now.
-### works for me <sup>TM</sup> on 8Gb VRAM, 16Gb RAM (GTX1070) ###
+### works for me <sup>TM</sup> on 8GB VRAM, 16GB RAM (GTX1070) ###
 
 ---
 ## Install ##
@@ -10,6 +10,9 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 Easiest way to ensure necessary diffusers release is installed is to edit **requirements_versions.txt** in the webUI directory.
 ```
 diffusers>=0.29.1
+transformers>=4.40
+tokenizers>=0.19
+huggingface-hub>=0.23.4
 ```
 
 **Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You will also need to accept the terms on the [SD3 Hugging Face page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
@@ -25,6 +28,8 @@ almost current UI screenshot
 ![](screenshot2.png "UI screenshot")
 
 ---
+#### 20/07/2024 ####
+* corrected passing of access token - different components need it passed in different keyword arguments and will error if they receive the one they don't want (even if they get the one they do want too).. Updated requirements based on installing in A1111, might be excessive.
 
 #### 13/07/2024 ####
 * reworked styles. Negatives removed; multi-select enabled; new options added, generally short and suitable for combining. Will aim to add more over time.

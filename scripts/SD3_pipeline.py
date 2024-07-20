@@ -344,7 +344,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         )
 
         self._guidance_scale = guidance_scale
-        self._mask_cutoff = mask_cutoff
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
 
@@ -414,8 +413,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 # 5.1. Prepare masked latent variables
                 #### mask_image already resized /8 at start of predict()
                 mask = self.mask_processor.preprocess(mask_image).to(device='cuda', dtype=torch.float16)
-#                mask = mask.repeat(num_images_per_prompt, 1, 1, 1)  #necessary?
-
 
 ####    with real inpaint model:
 ####                mask_condition = self.mask_processor.preprocess(mask_image)
@@ -445,12 +442,12 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 if self.interrupt:
                     continue
 
-                if doDiffDiff and float((i+1) / self._num_timesteps) <= self._mask_cutoff:# and i > 0 :
+                if doDiffDiff and float((i+1) / self._num_timesteps) <= mask_cutoff:# and i > 0 :
                     tmask = mask >= float((i+1) / self._num_timesteps)
                     init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
                     latents = (init_latents_proper * ~tmask) + (latents * tmask)
 
-                if doInPaint and float((i+1) / self._num_timesteps) <= self._mask_cutoff:
+                if doInPaint and float((i+1) / self._num_timesteps) <= mask_cutoff:
                     init_latents_proper = self.scheduler.scale_noise(image_latents, torch.tensor([t]), noise)
                     latents = (init_latents_proper * (1 - mask)) + (latents * mask)
 
@@ -545,8 +542,10 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
                 if XLA_AVAILABLE:
                     xm.mark_step()
 
-        if doInPaint and 1.0 <= self._mask_cutoff:
-            latents = (image_latents * (1 - mask)) + (latents * mask)
+        #unsure about this? leaves vae roundtrip error, maybe better for quality to keep last step processing
+        if (doDiffDiff or doInPaint) and 1.0 <= mask_cutoff:
+            tmask = (mask >= 1.0)
+            latents = (image_latents * ~tmask) + (latents * tmask)
 
         if output_type == "latent":
             image = latents

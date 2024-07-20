@@ -12,13 +12,13 @@ from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
 import gradio as gr
 
-from PIL import Image
 #workaround for unnecessary flash_attn requirement for Florence-2
 from unittest.mock import patch
 from transformers.dynamic_module_utils import get_imports
 from transformers import AutoProcessor, AutoModelForCausalLM 
 
 import customStylesListSD3 as styles
+import scripts.SD3_pipeline as pipeline
 
 class SD3Storage:
     lastSeed = -1
@@ -42,7 +42,6 @@ class SD3Storage:
 #from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
 from diffusers import FlowMatchEulerDiscreteScheduler
 
-from scripts.SD3_pipeline import SD3Pipeline_DoE_combined
 from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
@@ -185,7 +184,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                 subfolder='tokenizer_3',
                 torch_dtype=torch.float16,
                 max_length=512,
-                token=access_token,
+                use_auth_token=access_token,
                 )
 
             text_inputs = tokenizer(
@@ -206,7 +205,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                 subfolder='text_encoder_3',
                 torch_dtype=torch.float16,
                 device_map='auto',
-                token=access_token,
+                use_auth_token=access_token,
                )
             
             positive_embeds_3 = text_encoder(positive_input_ids)[0]
@@ -230,7 +229,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                     source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                     subfolder=tok,
                     torch_dtype=torch.float16,
-                    token=access_token,
+                    use_auth_token=access_token,
                 )
                 max_length = tokenizer.model_max_length
                 text_inputs = tokenizer(positive, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
@@ -246,7 +245,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                     source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                     subfolder=te,
                     torch_dtype=torch.float16,
-                    token=access_token,
+                    use_auth_token=access_token,
                 )
                 text_encoder.to('cuda')
 
@@ -313,9 +312,10 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(source,
                                                                 subfolder='scheduler', local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                                                                 shift=shift,
-                                                                token=access_token,)
+                                                                token=access_token,
+                                                                )
 
-    pipe = SD3Pipeline_DoE_combined.from_pretrained(
+    pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
         source,
         local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
         torch_dtype=torch.float16,
@@ -341,9 +341,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     #   always generate the noise here
     generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
-    #regen the generator otherwise results between batch/single will be different
+    #regen the generator to minimise differences between single/batch - might still be different - batch processing could use different pytorch kernels
     del generator
-    generator = torch.Generator(device='cpu').manual_seed(fixed_seed)
+    generator = torch.Generator(device='cpu').manual_seed(14641)
 
     #   colour the initial noise
     if SD3Storage.noiseRGBA[3] != 0.0:
@@ -358,7 +358,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
         image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
         image_latents = (pipe.vae.encode(image).latent_dist.sample(generator) - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
-        image_latents = image_latents.repeat(num_images, 1, 1, 1)
 
         image_latents = image_latents.repeat(num_images, 1, latents.size(2), latents.size(3))
 
@@ -461,6 +460,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 
 def on_ui_tabs():
+    from importlib import reload
+    reload(styles)
+    reload(pipeline)
 
     def buildLoRAList ():
         loras = ["(None)"]
@@ -626,7 +628,7 @@ def on_ui_tabs():
         if "Prompt" != p[0] and "Prompt: " != p[0][0:8]:               #   civitAI style special case
             positive = p[0]
             l = 1
-            while (l < lineCount) and not (p[l][0:17] == "Negative prompt: " or p[l][0:7] == "Steps: "):
+            while (l < lineCount) and not (p[l][0:17] == "Negative prompt: " or p[l][0:7] == "Steps: " or p[l][0:6] == "Size: "):
                 if p[l] != '':
                     positive += '\n' + p[l]
                 l += 1
@@ -642,7 +644,7 @@ def on_ui_tabs():
                 else:
                     continue
 
-                while (l+c < lineCount) and not (p[l+c][0:10] == "Negative: " or p[l+c][0:15] == "Negative Prompt" or p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                while (l+c < lineCount) and not (p[l+c][0:10] == "Negative: " or p[l+c][0:15] == "Negative Prompt" or p[l+c] == "Params" or p[l+c][0:7] == "Steps: " or p[l+c][0:6] == "Size: "):
                     if p[l+c] != '':
                         positive += '\n' + p[l+c]
                     c += 1
@@ -661,7 +663,7 @@ def on_ui_tabs():
                 else:
                     continue
                 
-                while (l+c < lineCount) and not (p[l+c] == "Params" or p[l+c][0:7] == "Steps: "):
+                while (l+c < lineCount) and not (p[l+c] == "Params" or p[l+c][0:7] == "Steps: " or p[l+c][0:6] == "Size: "):
                     if p[l+c] != '':
                         negative += '\n' + p[l+c]
                     c += 1
@@ -727,7 +729,6 @@ def on_ui_tabs():
 
 
     def refreshStyles (style):
-        from importlib import reload
         reload(styles)
         
         newList = [x[0] for x in styles.styles_list]
@@ -816,7 +817,7 @@ def on_ui_tabs():
                             i2iSetWH = gr.Button(value='Set Width / Height from image')
                             i2iFromGallery = gr.Button(value='Get image from gallery')
                             with gr.Row():
-                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=9)
+                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=7)
                                 toPrompt = ToolButton(value='P', variant='secondary')
                             maskCut = gr.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 

@@ -15,7 +15,7 @@ tokenizers>=0.19
 huggingface-hub>=0.23.4
 ```
 
-**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. Copy it. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You will also need to accept the terms on the [SD3 Hugging Face page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
+**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. **Read** type is all you need, avoid the much more complicated **Fine-grained** option. Copy the token. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You will also need to accept the terms on the [SD3 repository page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
 
 **Do not download the single file models, this extension cannot use them.**
 

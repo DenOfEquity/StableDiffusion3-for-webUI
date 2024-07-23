@@ -1,22 +1,29 @@
-import math
-import torch
 import gc
-import json
-import numpy as np
+import gradio
+import math
+import numpy
 import os
+import torch
 
+##   from webui
 from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
 from modules.shared import opts
 from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
-import gradio as gr
 
-#workaround for unnecessary flash_attn requirement for Florence-2
+##   diffusers / transformers necessary imports
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
+from diffusers import FlowMatchEulerDiscreteScheduler
+from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
+from diffusers.utils.torch_utils import randn_tensor
+
+##  for Florence-2, including workaround for unnecessary flash_attn requirement
 from unittest.mock import patch
 from transformers.dynamic_module_utils import get_imports
 from transformers import AutoProcessor, AutoModelForCausalLM 
 
+##   my stuff
 import customStylesListSD3 as styles
 import scripts.SD3_pipeline as pipeline
 
@@ -32,6 +39,13 @@ class SD3Storage:
     lora = None
     lora_scale = 1.0
     LFO = False
+    
+    te1 = None
+    te2 = None
+    te3 = None
+    pipe = None
+    loadedLora = False
+    
     locked = False     #   for preventing changes to the following volatile state while generating
     CL = True
     CG = True
@@ -39,44 +53,29 @@ class SD3Storage:
     ZN = False
     i2iAllSteps = False
 
-#from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline#, StableDiffusion3ControlNetPipeline
-from diffusers import FlowMatchEulerDiscreteScheduler
-
-from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
-
-from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
-
-from diffusers.utils.torch_utils import randn_tensor
-
-# modules/infotext_utils.py
-def quote(text):
-    if ',' not in str(text) and '\n' not in str(text) and ':' not in str(text):
-        return text
-
-    return json.dumps(text, ensure_ascii=False)
 
 
 # modules/processing.py
-def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, controlNetSettings):
+def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, loraSettings, controlNetSettings):
     generation_params = {
-        "Size": f"{width}x{height}",
-        "Seed": seed,
-        "Steps": steps,
-        "CFG": f"{guidance_scale} ({guidance_rescale}) [{guidance_cutoff}]",
-        "Shift": f"{shift}",
-        "Clip skip": f"{clipskip}",
-        "RNG": opts.randn_source if opts.randn_source != "GPU" else None,
-        "controlNet": controlNetSettings,
-        "CLIP-L":       '✓' if SD3Storage.CL else '✗',
-        "CLIP-G":       '✓' if SD3Storage.CG else '✗',
-        "T5":           '✓' if SD3Storage.T5 else '✗', #2713, 2717
-        "zero negative":'✓' if SD3Storage.ZN else '✗',
+        "Size"          :   f"{width}x{height}",
+        "Seed"          :   seed,
+        "Steps"         :   steps,
+        "CFG"           :   f"{guidance_scale} ({guidance_rescale}) [{guidance_cutoff}]",
+        "Shift"         :   f"{shift}",
+        "Clip skip"     :   f"{clipskip}",
+        "LoRA"          :   loraSettings,
+        "controlNet"    :   controlNetSettings,
+        "CLIP-L"        :   '✓' if SD3Storage.CL else '✗',
+        "CLIP-G"        :   '✓' if SD3Storage.CG else '✗',
+        "T5"            :   '✓' if SD3Storage.T5 else '✗', #2713, 2717
+        "zero negative" :   '✓' if SD3Storage.ZN else '✗',
     }
 #add loras list and scales
 
     prompt_text = f"Prompt: {positive_prompt}\n"
     prompt_text += (f"Negative: {negative_prompt}\n")
-    generation_params_text = ", ".join([k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
+    generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
     noise_text = f"\nInitial noise: {SD3Storage.noiseRGBA}" if SD3Storage.noiseRGBA[3] != 0.0 else ""
 
     return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}{noise_text}"
@@ -200,84 +199,129 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
             del tokenizer, text_inputs
 
-            text_encoder = T5EncoderModel.from_pretrained(
-                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                subfolder='text_encoder_3',
-                torch_dtype=torch.float16,
-                device_map='auto',
-                use_auth_token=access_token,
-               )
+            if SD3Storage.te3 == None:
+                SD3Storage.te3 = T5EncoderModel.from_pretrained(
+                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    subfolder='text_encoder_3',
+                    torch_dtype=torch.float16,
+                    device_map='auto',
+                    use_auth_token=access_token,
+                )
             
-            positive_embeds_3 = text_encoder(positive_input_ids)[0]
+            positive_embeds_3 = SD3Storage.te3(positive_input_ids)[0]
 
             if SD3Storage.ZN == True:
                 negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
             else:
-                negative_embeds_3 = text_encoder(negative_input_ids)[0]
+                negative_embeds_3 = SD3Storage.te3(negative_input_ids)[0]
 
-            del text_encoder
         else:
             #512 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
             positive_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
             negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
             #end: T5
 
+
     #   CLIPs
-        def doCLIP (positive, negative, tok, te, process):
-            if process:
-                tokenizer = CLIPTokenizer.from_pretrained(
+        max_length = 77                                     #   tokenizer.model_max_length
+        proj_dim = 768                                      #   text_encoder.config.projection_dim
+        joint_attn_dim = 4096                               #   from transformer config
+        if SD3Storage.CG:
+            tokenizer = CLIPTokenizer.from_pretrained(
+                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                subfolder='tokenizer',
+                torch_dtype=torch.float16,
+                use_auth_token=access_token,
+            )
+            text_inputs = tokenizer(positive_prompt_1, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
+            positive_input_ids = text_inputs.input_ids
+
+            if SD3Storage.ZN != True:
+                text_inputs = tokenizer(negative_prompt_1, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
+                negative_input_ids = text_inputs.input_ids
+            del tokenizer, text_inputs
+
+            if SD3Storage.te1 == None:
+                SD3Storage.te1 = CLIPTextModelWithProjection.from_pretrained(
                     source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                    subfolder=tok,
+                    subfolder='text_encoder',
                     torch_dtype=torch.float16,
                     use_auth_token=access_token,
                 )
-                max_length = tokenizer.model_max_length
-                text_inputs = tokenizer(positive, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
-                positive_input_ids = text_inputs.input_ids
+            SD3Storage.te1.to('cuda')
 
-                if SD3Storage.ZN != True:
-                    text_inputs = tokenizer(negative, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
-                    negative_input_ids = text_inputs.input_ids
-
-                del tokenizer, text_inputs
-
-                text_encoder = CLIPTextModelWithProjection.from_pretrained(
-                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                    subfolder=te,
-                    torch_dtype=torch.float16,
-                    use_auth_token=access_token,
-                )
-                text_encoder.to('cuda')
-
-                positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
-                pooled_positive = positive_embeds[0]
-                positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
-                
-                proj_dim = text_encoder.config.projection_dim
-                joint_attn_dim = 4096   #   from transformer config
-                if SD3Storage.ZN == True:
-                    negative_embeds = torch.zeros((1, max_length, joint_attn_dim),  device='cuda', dtype=torch.float16, )
-                    pooled_negative = torch.zeros((1, proj_dim),                    device='cuda', dtype=torch.float16, )
-                else:
-                    negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
-                    pooled_negative = negative_embeds[0]
-                    negative_embeds = negative_embeds.hidden_states[-2]
-                del text_encoder
+            positive_embeds = SD3Storage.te1(positive_input_ids.to('cuda'), output_hidden_states=True)
+            pooled_positive = positive_embeds[0]
+            positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
+            
+            if SD3Storage.ZN == True:
+                negative_embeds = torch.zeros((1, max_length, joint_attn_dim),  device='cuda', dtype=torch.float16, )
+                pooled_negative = torch.zeros((1, proj_dim),                    device='cuda', dtype=torch.float16, )
             else:
-                positive_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
-                negative_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
-                pooled_positive = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
-                pooled_negative = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
-            return positive_embeds, pooled_positive, negative_embeds, pooled_negative
+                negative_embeds = SD3Storage.te1(negative_input_ids.to('cuda'), output_hidden_states=True)
+                pooled_negative = negative_embeds[0]
+                negative_embeds = negative_embeds.hidden_states[-2]
 
-        positive_embeds_1, pooled_positive_embeds_1, negative_embeds_1, pooled_negative_embeds_1 = doCLIP (
-                                                                                                    positive_prompt_1, negative_prompt_1, 
-                                                                                                    'tokenizer',   'text_encoder', 
-                                                                                                    SD3Storage.CG)
-        positive_embeds_2, pooled_positive_embeds_2, negative_embeds_2, pooled_negative_embeds_2 = doCLIP (
-                                                                                                    positive_prompt_2, negative_prompt_2, 
-                                                                                                    'tokenizer_2', 'text_encoder_2', 
-                                                                                                    SD3Storage.CL)
+            SD3Storage.te1.to('cpu')
+        else:
+            positive_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
+            negative_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
+            pooled_positive = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
+            pooled_negative = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
+
+        positive_embeds_1 = positive_embeds
+        negative_embeds_1 = negative_embeds
+        pooled_positive_embeds_1 = pooled_positive
+        pooled_negative_embeds_1 = pooled_negative
+
+        proj_dim = 1280                                     #   text_encoder.config.projection_dim
+        if SD3Storage.CG:
+            tokenizer = CLIPTokenizer.from_pretrained(
+                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                subfolder='tokenizer_2',
+                torch_dtype=torch.float16,
+                use_auth_token=access_token,
+            )
+            text_inputs = tokenizer(positive_prompt_2, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
+            positive_input_ids = text_inputs.input_ids
+
+            if SD3Storage.ZN != True:
+                text_inputs = tokenizer(negative_prompt_2, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
+                negative_input_ids = text_inputs.input_ids
+            del tokenizer, text_inputs
+
+            if SD3Storage.te2 == None:
+                SD3Storage.te2 = CLIPTextModelWithProjection.from_pretrained(
+                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    subfolder='text_encoder_2',
+                    torch_dtype=torch.float16,
+                    use_auth_token=access_token,
+                )
+            SD3Storage.te2.to('cuda')
+
+            positive_embeds = SD3Storage.te2(positive_input_ids.to('cuda'), output_hidden_states=True)
+            pooled_positive = positive_embeds[0]
+            positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
+            
+            if SD3Storage.ZN == True:
+                negative_embeds = torch.zeros((1, max_length, joint_attn_dim),  device='cuda', dtype=torch.float16, )
+                pooled_negative = torch.zeros((1, proj_dim),                    device='cuda', dtype=torch.float16, )
+            else:
+                negative_embeds = SD3Storage.te2(negative_input_ids.to('cuda'), output_hidden_states=True)
+                pooled_negative = negative_embeds[0]
+                negative_embeds = negative_embeds.hidden_states[-2]
+
+            SD3Storage.te2.to('cpu')
+        else:
+            positive_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
+            negative_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
+            pooled_positive = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
+            pooled_negative = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
+
+        positive_embeds_2 = positive_embeds
+        negative_embeds_2 = negative_embeds
+        pooled_positive_embeds_2 = pooled_positive
+        pooled_negative_embeds_2 = pooled_negative
 
         #merge
         clip_positive_embeds = torch.cat([positive_embeds_1, positive_embeds_2], dim=-1)
@@ -314,28 +358,36 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                                                                 shift=shift,
                                                                 token=access_token,
                                                                 )
+    controlnet=SD3ControlNetModel.from_pretrained(useControlNet, cache_dir=".//models//diffusers//", torch_dtype=torch.float16) if useControlNet else None
 
-    pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
-        source,
-        local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-        torch_dtype=torch.float16,
-        tokenizer  =None,   text_encoder  =None,
-        tokenizer_2=None,   text_encoder_2=None,
-        tokenizer_3=None,   text_encoder_3=None,
-        scheduler=scheduler,
-        token=access_token,
-        controlnet=SD3ControlNetModel.from_pretrained(useControlNet, cache_dir=".//models//diffusers//", torch_dtype=torch.float16) if useControlNet else None
-    )
-    del scheduler
+    if SD3Storage.pipe == None:
+        SD3Storage.pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
+            source,
+            local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+            torch_dtype=torch.float16,
+#            tokenizer  =None,   text_encoder  =None,
+#            tokenizer_2=None,   text_encoder_2=None,
+#            tokenizer_3=None,   text_encoder_3=None,
+            scheduler=scheduler,
+            token=access_token,
+            controlnet=controlnet
+        )
+        SD3Storage.pipe.enable_sequential_cpu_offload()#enable_sequential_cpu_offload() #   implies .to('cuda') as necessary, slower than enable_model_cpu_offload, maybe up to 40%
+#        SD3Storage.pipe.vae.enable_slicing()       #   tiling works once only?
 
-    pipe.enable_model_cpu_offload() #   implies .to('cuda') as necessary
-    pipe.vae.enable_slicing()       #   tiling works once only?
+        SD3Storage.pipe.transformer.to(memory_format=torch.channels_last)
+        SD3Storage.pipe.vae.to(memory_format=torch.channels_last)
+    else:
+        SD3Storage.pipe.scheduler = scheduler
+        SD3Storage.pipe.controlnet = controlnet
+
+    del scheduler, controlnet
 
     shape = (
         num_images,
-        pipe.transformer.config.in_channels,
-        int(height) // pipe.vae_scale_factor,
-        int(width) // pipe.vae_scale_factor,
+        SD3Storage.pipe.transformer.config.in_channels,
+        int(height) // SD3Storage.pipe.vae_scale_factor,
+        int(width) // SD3Storage.pipe.vae_scale_factor,
     )
 
     #   always generate the noise here
@@ -351,13 +403,13 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         ng = SD3Storage.noiseRGBA[1] ** 0.5
         nb = SD3Storage.noiseRGBA[2] ** 0.5
 
-        imageR = torch.tensor(np.full((8,8), (nr), dtype=np.float32))
-        imageG = torch.tensor(np.full((8,8), (ng), dtype=np.float32))
-        imageB = torch.tensor(np.full((8,8), (nb), dtype=np.float32))
+        imageR = torch.tensor(numpy.full((8,8), (nr), dtype=numpy.float32))
+        imageG = torch.tensor(numpy.full((8,8), (ng), dtype=numpy.float32))
+        imageB = torch.tensor(numpy.full((8,8), (nb), dtype=numpy.float32))
         image = torch.stack((imageR, imageG, imageB), dim=0).unsqueeze(0)
 
-        image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
-        image_latents = (pipe.vae.encode(image).latent_dist.sample(generator) - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+        image = SD3Storage.pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
+        image_latents = (SD3Storage.pipe.vae.encode(image).latent_dist.sample(generator) - SD3Storage.pipe.vae.config.shift_factor) * SD3Storage.pipe.vae.config.scaling_factor
 
         image_latents = image_latents.repeat(num_images, 1, latents.size(2), latents.size(3))
 
@@ -372,16 +424,16 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 
 
-#   load in LoRA, weight passed to pipe
+##  load in LoRA, weight passed to pipe
     if SD3Storage.lora and SD3Storage.lora != "(None)" and SD3Storage.lora_scale != 0.0:
         lorafile = ".//models/diffusers//SD3Lora//" + SD3Storage.lora + ".safetensors"
         try:
-            pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
-#            pipe.set_adapters(SD3Storage.lora, adapter_weights=SD3Storage.lora_scale)    #.set_adapters doesn't exist so no easy multiple LoRAs and weights
+            SD3Storage.pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
+            SD3Storage.loadedLora = True
+        #   pipe.set_adapters(SD3Storage.lora, adapter_weights=SD3Storage.lora_scale)    #.set_adapters doesn't exist so no easy multiple LoRAs and weights
         except:
             print ("Failed: LoRA: " + lorafile)
-            SD3Storage.locked = False
-            return gr.Button.update(value='Generate', variant='primary', interactive=True), None
+            #  no reason to abort, just carry on without LoRA
 
 #adapter_weight_scales = { "unet": { "down": 1, "mid": 0, "up": 0} }
 #pipe.set_adapters("pixel", adapter_weight_scales)
@@ -389,11 +441,12 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 #    print (pipe.scheduler.compatibles)
 
-    pipe.transformer.to(memory_format=torch.channels_last)
-    pipe.vae.to(memory_format=torch.channels_last)
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
     with torch.inference_mode():
-        output = pipe(
+        output = SD3Storage.pipe(
             num_inference_steps             = num_steps,
             guidance_scale                  = guidance_scale,
             guidance_rescale                = guidance_rescale,
@@ -421,13 +474,22 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         ).images
         del controlNetImage, i2iSource
 
-    del pipe, generator, latents
+    del generator, latents
+
+    if SD3Storage.loadedLora == True:
+        SD3Storage.pipe.unload_lora_weights()
+        SD3Storage.loadedLora = False
 
     gc.collect()
     torch.cuda.empty_cache()
 
+    if SD3Storage.lora != "(None)" and SD3Storage.lora_scale != 0.0:
+        loraSettings = SD3Storage.lora + f" ({SD3Storage.lora_scale})"
+    else:
+        loraSettings = None
+
     if useControlNet != None:
-        useControlNet += f" strength: {controlNetStrength}, step range: {controlNetStart}-{controlNetEnd}"
+        useControlNet += f" strength: {controlNetStrength}; step range: {controlNetStart}-{controlNetEnd}"
 
     result = []
     for image in output:
@@ -435,7 +497,8 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             combined_positive, combined_negative, 
             guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, num_steps, 
             fixed_seed, 
-            width, height, 
+            width, height,
+            loraSettings,
             useControlNet)
 
         result.append((image, info))
@@ -456,14 +519,10 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     torch.cuda.empty_cache()
 
     SD3Storage.locked = False
-    return gr.Button.update(value='Generate', variant='primary', interactive=True), result
+    return gradio.Button.update(value='Generate', variant='primary', interactive=True), result
 
 
 def on_ui_tabs():
-#    from importlib import reload
-#    reload(styles)
-#    reload(pipeline)
-
     def buildLoRAList ():
         loras = ["(None)"]
         
@@ -480,9 +539,9 @@ def on_ui_tabs():
 
     def refreshLoRAs ():
         loras = buildLoRAList ()
-        return gr.Dropdown.update(choices=loras)
+        return gradio.Dropdown.update(choices=loras)
    
-    def getGalleryIndex (evt: gr.SelectData):
+    def getGalleryIndex (evt: gradio.SelectData):
         SD3Storage.galleryIndex = evt.index
 
     def reuseLastSeed ():
@@ -557,36 +616,36 @@ def on_ui_tabs():
             return originalPrompt
     def toggleC2P ():
         SD3Storage.captionToPrompt ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.captionToPrompt])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.captionToPrompt])
     def toggleLFO ():
         SD3Storage.LFO ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.LFO])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.LFO])
 
     #   these are volatile state, should not be changed during generation
     def toggleCL ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
             SD3Storage.CL ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.CL])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.CL])
     def toggleCG ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
             SD3Storage.CG ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.CG])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.CG])
     def toggleT5 ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
             SD3Storage.T5 ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.T5])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.T5])
     def toggleZN ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
             SD3Storage.ZN ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.ZN])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.ZN])
     def toggleAS ():
         if not SD3Storage.locked:
             SD3Storage.i2iAllSteps ^= True
-        return gr.Button.update(variant=['secondary', 'primary'][SD3Storage.i2iAllSteps])
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.i2iAllSteps])
 
     resolutionList = [
         (1536, 672),    (1344, 768),    (1248, 832),    (1120, 896),
@@ -616,10 +675,10 @@ def on_ui_tabs():
         SD3Storage.lora = lora
         SD3Storage.lora_scale = scale# if lora != "(None)" else 1.0
         SD3Storage.locked = True
-        return gr.Button.update(value='...', variant='secondary', interactive=False)
+        return gradio.Button.update(value='...', variant='secondary', interactive=False)
 
 
-    def parsePrompt (positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns):
+    def parsePrompt (positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns, loraName, loraScale):
         p = positive.split('\n')
         lineCount = len(p)
 
@@ -705,8 +764,13 @@ def on_ui_tabs():
                             width = float(pairs[1])
                         case "height:":
                             height = float(pairs[1])
+                        case "LoRA:":
+                            if len(pairs) == 3:
+                                loraName = pairs[1]
+                                loraScale = float(pairs[2].strip('\(\)'))
+                            
                         #clipskip?
-        return positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns
+        return positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns, loraName, loraScale
 
     def style2prompt (prompt, style):
         splitPrompt = prompt.split('|')
@@ -738,101 +802,101 @@ def on_ui_tabs():
             if s in newList:
                 newStyle.append(s)
 
-        return gr.Dropdown.update(choices=newList, value=newStyle)
+        return gradio.Dropdown.update(choices=newList, value=newStyle)
 
 
-    with gr.Blocks() as sd3_block:
+    with gradio.Blocks() as sd3_block:
         with ResizeHandleRow():
-            with gr.Column():
-#                with gr.Row():
+            with gradio.Column():
+#                with gradio.Row():
 #                    LFO = ToolButton(value='lfo', variant='secondary', tooltip='local files only')
-                with gr.Row():
-                    positive_prompt = gr.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                with gradio.Row():
+                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
                     CL = ToolButton(value='CL', variant='primary',   tooltip='use CLIP-L text encoder')
                     CG = ToolButton(value='CG', variant='primary',   tooltip='use CLIP-G text encoder')
                     T5 = ToolButton(value='T5', variant='secondary', tooltip='use T5 text encoder')
                     ZN = ToolButton(value='ZN', variant='secondary', tooltip='zero out negative embeds')
-                with gr.Row():
-                    negative_prompt = gr.Textbox(label='Negative', placeholder='', lines=1.01)
+                with gradio.Row():
+                    negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.01)
                     randNeg = ToolButton(value='rng', variant='secondary', tooltip='random negative')
-                    clipskip = gr.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
+                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
 
-                with gr.Row():
-                    style = gr.Dropdown([x[0] for x in styles.styles_list], label='Style', value=None, type='value', multiselect=True)
+                with gradio.Row():
+                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value=None, type='value', multiselect=True)
                     strfh = ToolButton(value="🔄", variant='secondary', tooltip='reload styles')
                     st2pr = ToolButton(value="📋", variant='secondary', tooltip='add style to prompt')
 #make infotext from all settings, send to clipboard?
                     nouse = ToolButton(value="️", variant='tertiary', tooltip='', interactive=False)
                     parse = ToolButton(value="↙️", variant='secondary', tooltip='parse')
 
-                with gr.Row():
-                    width = gr.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
+                with gradio.Row():
+                    width = gradio.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
                     swapper = ToolButton(value='\U000021C4')
-                    height = gr.Slider(label='Height', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_height')
-                    dims = gr.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList],
+                    height = gradio.Slider(label='Height', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_height')
+                    dims = gradio.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList],
                                         label='Quickset', type='index', scale=0)
 
-                with gr.Row():
-                    guidance_scale = gr.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=1)
-                    CFGrescale = gr.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
-                    CFGcutoff = gr.Slider(label='CFG cutoff step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
-                    shift = gr.Slider(label='Shift', minimum=1.0, maximum=8.0, step=0.1, value=3.0, scale=1)
-                with gr.Row(equal_height=True):
-                    steps = gr.Slider(label='Steps', minimum=1, maximum=80, step=1, value=20, scale=2)
-                    sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=0)
+                with gradio.Row():
+                    guidance_scale = gradio.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=1)
+                    CFGrescale = gradio.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
+                    CFGcutoff = gradio.Slider(label='CFG cutoff step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
+                    shift = gradio.Slider(label='Shift', minimum=1.0, maximum=8.0, step=0.1, value=3.0, scale=1)
+                with gradio.Row(equal_height=True):
+                    steps = gradio.Slider(label='Steps', minimum=1, maximum=80, step=1, value=20, scale=2)
+                    sampling_seed = gradio.Number(label='Seed', value=-1, precision=0, scale=0)
                     random = ToolButton(value="\U0001f3b2\ufe0f")
                     reuseSeed = ToolButton(value="\u267b\ufe0f")
-                    batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
+                    batch_size = gradio.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
 
-                with gr.Row(equal_height=True):
-                    lora = gr.Dropdown([x for x in loras], label='LoRA', value="(None)", type='value', multiselect=False, scale=1)
+                with gradio.Row(equal_height=True):
+                    lora = gradio.Dropdown([x for x in loras], label='LoRA (place in models/diffusers/SD3Lora)', value="(None)", type='value', multiselect=False, scale=1)
                     refresh = ToolButton(value='\U0001f504')
-                    scale = gr.Slider(label='LoRA weight', minimum=-1.0, maximum=1.0, value=1.0, step=0.01, scale=1)
+                    scale = gradio.Slider(label='LoRA weight', minimum=-1.0, maximum=1.0, value=1.0, step=0.01, scale=1)
 
-                with gr.Accordion(label='the colour of noise', open=False):
-                    with gr.Row():
-                        initialNoiseR = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
-                        initialNoiseG = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
-                        initialNoiseB = gr.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
-                        initialNoiseA = gr.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
+                with gradio.Accordion(label='the colour of noise', open=False):
+                    with gradio.Row():
+                        initialNoiseR = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='red')
+                        initialNoiseG = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
+                        initialNoiseB = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
+                        initialNoiseA = gradio.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
 
-                with gr.Accordion(label='ControlNet', open=False):
-                    with gr.Row():
-                        CNSource = gr.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        with gr.Column():
-                            CNMethod = gr.Dropdown(['(None)', 'canny', 'pose', 'tile'], label='method', value='(None)', type='index', multiselect=False, scale=1)
-                            CNStrength = gr.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
-                            CNStart = gr.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
-                            CNEnd = gr.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+                with gradio.Accordion(label='ControlNet', open=False):
+                    with gradio.Row():
+                        CNSource = gradio.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gradio.Column():
+                            CNMethod = gradio.Dropdown(['(None)', 'canny', 'pose', 'tile'], label='method', value='(None)', type='index', multiselect=False, scale=1)
+                            CNStrength = gradio.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
+                            CNStart = gradio.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
+                            CNEnd = gradio.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
 
-                with gr.Accordion(label='image to image', open=False):
-                    with gr.Row():
-                        i2iSource = gr.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        maskSource = gr.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        with gr.Column():
-                            with gr.Row():
-                                i2iDenoise = gr.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
+                with gradio.Accordion(label='image to image', open=False):
+                    with gradio.Row():
+                        i2iSource = gradio.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        with gradio.Column():
+                            with gradio.Row():
+                                i2iDenoise = gradio.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
                                 AS = ToolButton(value='AS')
  
-                            i2iSetWH = gr.Button(value='Set Width / Height from image')
-                            i2iFromGallery = gr.Button(value='Get image from gallery')
-                            with gr.Row():
-                                i2iCaption = gr.Button(value='Caption this image (Florence-2)', scale=7)
+                            i2iSetWH = gradio.Button(value='Set Width / Height from image')
+                            i2iFromGallery = gradio.Button(value='Get image from gallery')
+                            with gradio.Row():
+                                i2iCaption = gradio.Button(value='Caption this image (Florence-2)', scale=7)
                                 toPrompt = ToolButton(value='P', variant='secondary')
-                            maskCut = gr.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
+                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
                 ctrls = [positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, CFGcutoff, shift, clipskip, steps, sampling_seed,
                          batch_size, style, i2iSource, i2iDenoise, maskSource, maskCut, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
-                parseable = [positive_prompt, negative_prompt, width, height, sampling_seed, steps, guidance_scale, CFGrescale, CFGcutoff, shift, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA]
+                parseable = [positive_prompt, negative_prompt, width, height, sampling_seed, steps, guidance_scale, CFGrescale, CFGcutoff, shift, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale]
 
-            with gr.Column():
-                generate_button = gr.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gr.Gallery(label='Output', height="80vh",
-                                            show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
+            with gradio.Column():
+                generate_button = gradio.Button(value="Generate", variant='primary', visible=True)
+                output_gallery = gradio.Gallery(label='Output', height="80vh",
+                                            show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
 
-                with gr.Row():
+                with gradio.Row():
                     buttons = parameters_copypaste.create_buttons(["img2img", "inpaint", "extras"])
 
                 for tabname, button in buttons.items():

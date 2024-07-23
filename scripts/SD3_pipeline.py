@@ -90,7 +90,8 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     return noise_cfg
 
 class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingleFileMixin):
-    model_cpu_offload_seq = "text_encoder->text_encoder_2->text_encoder_3->transformer->vae"
+#    model_cpu_offload_seq = "text_encoder->text_encoder_2->text_encoder_3->transformer->vae"
+    model_cpu_offload_seq = "transformer->vae"
     _optional_components = []
     _callback_tensor_inputs = ["latents", "prompt_embeds", "negative_prompt_embeds", "negative_pooled_prompt_embeds"]
 
@@ -99,12 +100,12 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         transformer: SD3Transformer2DModel,
         scheduler: FlowMatchEulerDiscreteScheduler,
         vae: AutoencoderKL,
-        text_encoder: CLIPTextModelWithProjection,
-        tokenizer: CLIPTokenizer,
-        text_encoder_2: CLIPTextModelWithProjection,
-        tokenizer_2: CLIPTokenizer,
-        text_encoder_3: T5EncoderModel,
-        tokenizer_3: T5TokenizerFast,
+#        text_encoder: CLIPTextModelWithProjection,
+#        tokenizer: CLIPTokenizer,
+#        text_encoder_2: CLIPTextModelWithProjection,
+#        tokenizer_2: CLIPTokenizer,
+#        text_encoder_3: T5EncoderModel,
+#        tokenizer_3: T5TokenizerFast,
 
         controlnet: Union[
             SD3ControlNetModel, List[SD3ControlNetModel], Tuple[SD3ControlNetModel], SD3MultiControlNetModel
@@ -114,12 +115,12 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 
         self.register_modules(
             vae=vae,
-            text_encoder=text_encoder,
-            text_encoder_2=text_encoder_2,
-            text_encoder_3=text_encoder_3,
-            tokenizer=tokenizer,
-            tokenizer_2=tokenizer_2,
-            tokenizer_3=tokenizer_3,
+#            text_encoder=text_encoder,
+#            text_encoder_2=text_encoder_2,
+#            text_encoder_3=text_encoder_3,
+#            tokenizer=tokenizer,
+#            tokenizer_2=tokenizer_2,
+#            tokenizer_3=tokenizer_3,
             transformer=transformer,
             scheduler=scheduler,
             controlnet=controlnet,

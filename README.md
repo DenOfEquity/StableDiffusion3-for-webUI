@@ -2,6 +2,9 @@
 I don't think there is anything Forge specific here. But A1111 has native support now.
 ### works for me <sup>TM</sup> on 8GB VRAM, 16GB RAM (GTX1070) ###
 
+## test version ##
+This branch doesn't delete the models between uses, so saves load time. Trade off is greedier use of RAM and VRAM, and slower inference by about 30-40%.
+
 ---
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.

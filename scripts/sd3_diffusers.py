@@ -1,9 +1,12 @@
+### THIS IS THE noUnload VERSION ####
+
 import gc
 import gradio
 import math
 import numpy
 import os
 import torch
+
 
 ##   from webui
 from modules import script_callbacks, images, shared
@@ -178,49 +181,83 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     else:
         #do the T5, if enabled
         if SD3Storage.T5 == True:
+            max_length = 256        #   could be 512, but slower processing
             tokenizer = T5TokenizerFast.from_pretrained(
                 source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                 subfolder='tokenizer_3',
                 torch_dtype=torch.float16,
-                max_length=512,
+                max_length=max_length,
                 use_auth_token=access_token,
                 )
 
             text_inputs = tokenizer(
-                positive_prompt_3,          padding="max_length", max_length=512, truncation=True,
+                positive_prompt_3,          padding="max_length", max_length=max_length, truncation=True,
                 add_special_tokens=True,    return_tensors="pt", )
             positive_input_ids = text_inputs.input_ids
 
             if SD3Storage.ZN != True:
                 text_inputs = tokenizer(
-                    negative_prompt_3,          padding="max_length", max_length=512, truncation=True,
+                    negative_prompt_3,          padding="max_length", max_length=max_length, truncation=True,
                     add_special_tokens=True,    return_tensors="pt", )
                 negative_input_ids = text_inputs.input_ids
 
             del tokenizer, text_inputs
 
             if SD3Storage.te3 == None:
+                device_map = {  #   how to find which blocks are most important? if any?
+                    'shared': 0,
+                    'encoder.embed_tokens': 0,
+                    'encoder.block.0': 'cpu',
+                    'encoder.block.1': 'cpu',
+                    'encoder.block.2': 'cpu', 
+                    'encoder.block.3': 'cpu', 
+                    'encoder.block.4': 'cpu', 
+                    'encoder.block.5': 'cpu', 
+                    'encoder.block.6': 'cpu', 
+                    'encoder.block.7': 'cpu', 
+                    'encoder.block.8': 'cpu', 
+                    'encoder.block.9': 'cpu', 
+                    'encoder.block.10': 'cpu', 
+                    'encoder.block.11': 'cpu', 
+                    'encoder.block.12': 'cpu', 
+                    'encoder.block.13': 'cpu', 
+                    'encoder.block.14': 'cpu', 
+                    'encoder.block.15': 'cpu', 
+                    'encoder.block.16': 'cpu', 
+                    'encoder.block.17': 'cpu', 
+                    'encoder.block.18': 'cpu', 
+                    'encoder.block.19': 'cpu', 
+                    'encoder.block.20': 'cpu', 
+                    'encoder.block.21': 'cpu', 
+                    'encoder.block.22': 'cpu', 
+                    'encoder.block.23': 'cpu', 
+                    'encoder.final_layer_norm': 0, 
+                    'encoder.dropout': 0
+                }
+                print ("loading T5 ...")
                 SD3Storage.te3 = T5EncoderModel.from_pretrained(
                     source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                     subfolder='text_encoder_3',
                     torch_dtype=torch.float16,
-                    device_map='auto',
+                    device_map=device_map,
+                    low_cpu_mem_usage=True,                
+                    use_safetensors=True,
                     use_auth_token=access_token,
                 )
-            
+                print ("... loaded")
+            print ("processing T5 ...")
             positive_embeds_3 = SD3Storage.te3(positive_input_ids)[0]
 
             if SD3Storage.ZN == True:
-                negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
+                negative_embeds_3 = torch.zeros((1, 256, 4096),    device='cpu', dtype=torch.float16, )
             else:
                 negative_embeds_3 = SD3Storage.te3(negative_input_ids)[0]
-
+            print ("... processed")
         else:
             #512 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
-            negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
+            positive_embeds_3 = torch.zeros((1, 256, 4096),    device='cpu', dtype=torch.float16, )
+            negative_embeds_3 = torch.zeros((1, 256, 4096),    device='cpu', dtype=torch.float16, )
             #end: T5
-
 
     #   CLIPs
         max_length = 77                                     #   tokenizer.model_max_length
@@ -247,8 +284,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                     subfolder='text_encoder',
                     torch_dtype=torch.float16,
                     use_auth_token=access_token,
-                )
-            SD3Storage.te1.to('cuda')
+                ).to('cuda')
 
             positive_embeds = SD3Storage.te1(positive_input_ids.to('cuda'), output_hidden_states=True)
             pooled_positive = positive_embeds[0]
@@ -261,8 +297,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                 negative_embeds = SD3Storage.te1(negative_input_ids.to('cuda'), output_hidden_states=True)
                 pooled_negative = negative_embeds[0]
                 negative_embeds = negative_embeds.hidden_states[-2]
-
-            SD3Storage.te1.to('cpu')
         else:
             positive_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
             negative_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
@@ -296,8 +330,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                     subfolder='text_encoder_2',
                     torch_dtype=torch.float16,
                     use_auth_token=access_token,
-                )
-            SD3Storage.te2.to('cuda')
+                ).to('cuda')
 
             positive_embeds = SD3Storage.te2(positive_input_ids.to('cuda'), output_hidden_states=True)
             pooled_positive = positive_embeds[0]
@@ -310,8 +343,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                 negative_embeds = SD3Storage.te2(negative_input_ids.to('cuda'), output_hidden_states=True)
                 pooled_negative = negative_embeds[0]
                 negative_embeds = negative_embeds.hidden_states[-2]
-
-            SD3Storage.te2.to('cpu')
         else:
             positive_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
             negative_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
@@ -368,11 +399,13 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 #            tokenizer  =None,   text_encoder  =None,
 #            tokenizer_2=None,   text_encoder_2=None,
 #            tokenizer_3=None,   text_encoder_3=None,
+            low_cpu_mem_usage=True,                
+            use_safetensors=True,
             scheduler=scheduler,
             token=access_token,
             controlnet=controlnet
         )
-        SD3Storage.pipe.enable_sequential_cpu_offload()#enable_sequential_cpu_offload() #   implies .to('cuda') as necessary, slower than enable_model_cpu_offload, maybe up to 40%
+        SD3Storage.pipe.enable_sequential_cpu_offload()  # enable_sequential_cpu_offload()  slower than enable_model_cpu_offload, maybe up to 40%
 #        SD3Storage.pipe.vae.enable_slicing()       #   tiling works once only?
 
         SD3Storage.pipe.transformer.to(memory_format=torch.channels_last)

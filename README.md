@@ -15,12 +15,35 @@ tokenizers>=0.19
 huggingface-hub>=0.23.4
 ```
 
-**Also needs a huggingface access token.** Sign up / log in, go to your profile, create an access token. **Read** type is all you need, avoid the much more complicated **Fine-grained** option. Copy the token. Make a textfile called ```huggingface_access_token.txt``` in the main webui folder, i.e. ```{forge install directory}\webui```, and paste the token in there. You will also need to accept the terms on the [SD3 repository page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
+>[!IMPORTANT]
+> **Also needs a huggingface access token:**
+> Sign up / log in, go to your profile, create an access token. **Read** type is all you need, avoid the much more complicated **Fine-grained** option. Copy the token. Make a textfile called `huggingface_access_token.txt` in the main webui folder, e.g. `{forge install directory}\webui`, and paste the token in there. You will also need to accept the terms on the [SD3 repository page](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers).
 
-**Do not download the single file models, this extension cannot use them.**
+>[!NOTE]
+> Do not download the single file models, this extension cannot use them.
+
+---
+<details>
+<summary>possibly necessary /alternate for Automatic1111</summary>
+
+* open a console in the webui directory
+* enter ```venv\scripts\activate```
+* enter ```pip install -r requirements_versions.txt``` after making the updates listed above
+</details>
 
 ---
 ### downloads models on first use - ~5.6GB minimum (~14.4GB including T5 text encoder) ###
+
+---
+### Branches ###
+#### (noUnload branch now defunct but this information still relevant, see Change log 27/07/2024) ####
+| | main | noUnload |
+|---|---|---|
+| info | frees models after use, reloads each time. Plays better with other apps, or if switching to other model types. | keeps models in memory (either VRAM or RAM). Avoids load times but shuffling models around memory can be slow too - especially if you don't have enough. |
+| realistic minimum specs | 8GB VRAM, 16GB RAM, decent SSD | 6GB VRAM?, 16GB RAM |
+| T5 performance | should be optimal for hardware used (device_map='auto', for those who know what that means) | minimises VRAM usage (for me it can be ~15% slower) (custom device_map) |
+
+For me: GTX 1070 8GB VRAM, 16GB RAM, not top-end SSD **main** is a little faster overall. If using mechanical HD, **noUnload** should be much faster (after the initial load).
 
 ---
 almost current UI screenshot
@@ -28,8 +51,20 @@ almost current UI screenshot
 ![](screenshot2.png "UI screenshot")
 
 ---
+<details>
+<summary>Change log</summary>
+
+#### 27/07/2024 ####
+* added drawing of masks for image to image. Load/copy the source image into the mask, to use as a template.
+* combined branches: now noUnload is an option. Much better than maintaining two branches.
+* added custom checkpoints. Not sure if custom CLIPs handled correctly yet, but will fallback to base for them anyway.
+
+#### 24/07/2024 ####
+* added SuperPrompt button (ꌗ) to rewrite simple prompts with more detail. This **overwrites** the prompt. Read about SuperPrompt [here](https://brianfitzgerald.xyz/prompt-augmentation). Credit to BrianFitzgerald for the model. (all my alternate model extensions are updated to use this; the model is loaded to a shared location so there's no wasted memory due to duplicates.)
+* added loading of custom transformers. Not currently supporting custom CLIPs, and I hope no one is dumb enough to finetune the T5. They must be placed in subdirectory `models\diffusers\SD3Custom`, from the main webUI directory. Tested with a couple of finetunes from CivitAI. Not worth it, IMO.
+
 #### 20/07/2024 ####
-* corrected passing of access token - different components need it passed in different keyword arguments and will error if they receive the one they don't want (even if they get the one they do want too).. Updated requirements based on installing in A1111, might be excessive.
+* corrected passing of access token - different components need it passed in different keyword arguments and will error if they receive the one they don't want (even if they get the one they do want too)... I've since noticed a deprecation warning in the console in A1111 (telling me I should use the keyword that didn't work), which is peak comedy.  Updated requirements based on installing in A1111, might be excessive but this stuff is a PITA to test.
 
 #### 13/07/2024 ####
 * reworked styles. Negatives removed; multi-select enabled; new options added, generally short and suitable for combining. Will aim to add more over time.
@@ -84,7 +119,7 @@ almost current UI screenshot
 * settings to colourize the initial noise. This offers some extra control over the output and is near-enough free. Leave strength at 0.0 to bypass it.
 
 #### 15/06/2024 ####
-* LoRA support, with weight. Put them in ```models\diffusers\SD3Lora```. Only one at a time, *set_adapters* not working for SD3 pipe? Note that not all out there are the right form, so generation might cancel. Error will be logged to console. Doesn't work with i2i, that pipeline doesn't accept the parameter. Starting to think I should aim to rewrite/combine the pipelines.
+* LoRA support, with weight. Put them in `models\diffusers\SD3Lora`. Only one at a time, *set_adapters* not working for SD3 pipe? Note that not all out there are the right form, so generation might cancel. Error will be logged to console. Doesn't work with i2i, that pipeline doesn't accept the parameter. Starting to think I should aim to rewrite/combine the pipelines.
 
 #### 14/06/2024 ####
 * triple prompt button removed, all handled automatically now, as follows:
@@ -111,9 +146,11 @@ almost current UI screenshot
 * no sampler selection as it seems only the default one works
 * seems to go over 8GB VRAM during VAE process, but it isn't that slow so could be VAE in VRAM with transformer hanging around.
 * based on the pipeline, each text encoder can have its own positive/negative prompts. Not sure if worth implementing.
+</details>
 
 ---
 ### example ###
-
-![](example.png "24 steps, 3.9 CFG, t2i +1 iteration i2i")
+|battle|there's something in the woods|
+|---|---|
+|![](example.png "24 steps, 3.9 CFG, t2i +1 iteration i2i")|![](example.png2 "20 steps, 5 CFG, no T5, other settings")|
 

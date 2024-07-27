@@ -1,9 +1,55 @@
+#### THIS IS THE main BRANCH - deletes models after use
+
+#todo: check VRAM, different paths
+#   low <= 6GB enable_sequential_model_offload() on pipe
+#   medium 8-10/12? as is
+#   high 16         - everything fully to GPU while running, CLIPs + transformer to cpu after use (T5 stay GPU)
+#   very high 24+   - everything to GPU, noUnload (lock setting?)
+
+class SD3Storage:
+    ModuleReload = False
+    lastSeed = -1
+    galleryIndex = 0
+    combined_positive = None
+    combined_negative = None
+    clipskip = 0
+    redoEmbeds = True
+    noiseRGBA = [0.0, 0.0, 0.0, 0.0]
+    captionToPrompt = False
+    lora = None
+    lora_scale = 1.0
+    LFO = False
+
+    teT5 = None
+    teCG = None
+    teCL = None
+    lastModel = None
+    lastControlNet = None
+    pipe = None
+    loadedLora = False
+
+    locked = False     #   for preventing changes to the following volatile state while generating
+    noUnload = False
+    useCL = True
+    useCG = True
+    useT5 = False
+    ZN = False
+    i2iAllSteps = False
+    sharpNoise = False
+
+
 import gc
 import gradio
 import math
 import numpy
 import os
 import torch
+import torchvision.transforms.functional as TF
+try:
+    import reload
+    SD3Storage.ModuleReload = True
+except:
+    SD3Storage.ModuleReload = False
 
 ##   from webui
 from modules import script_callbacks, images, shared
@@ -13,8 +59,8 @@ from modules.ui_components import ResizeHandleRow, ToolButton
 import modules.infotext_utils as parameters_copypaste
 
 ##   diffusers / transformers necessary imports
-from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
-from diffusers import FlowMatchEulerDiscreteScheduler
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast, T5ForConditionalGeneration
+from diffusers import FlowMatchEulerDiscreteScheduler, SD3Transformer2DModel
 from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -27,30 +73,9 @@ from transformers import AutoProcessor, AutoModelForCausalLM
 import customStylesListSD3 as styles
 import scripts.SD3_pipeline as pipeline
 
-class SD3Storage:
-    lastSeed = -1
-    galleryIndex = 0
-    combined_positive = None
-    combined_negative = None
-    clipskip = 0
-    redoEmbeds = True
-    noiseRGBA = [0.0, 0.0, 0.0, 0.0]
-    captionToPrompt = False
-    lora = None
-    lora_scale = 1.0
-    LFO = False
-    
-    locked = False     #   for preventing changes to the following volatile state while generating
-    CL = True
-    CG = True
-    T5 = False
-    ZN = False
-    i2iAllSteps = False
-
-
 
 # modules/processing.py
-def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, loraSettings, controlNetSettings):
+def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, loraSettings, controlNetSettings):
     generation_params = {
         "Size"          :   f"{width}x{height}",
         "Seed"          :   seed,
@@ -60,9 +85,9 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_r
         "Clip skip"     :   f"{clipskip}",
         "LoRA"          :   loraSettings,
         "controlNet"    :   controlNetSettings,
-        "CLIP-L"        :   '✓' if SD3Storage.CL else '✗',
-        "CLIP-G"        :   '✓' if SD3Storage.CG else '✗',
-        "T5"            :   '✓' if SD3Storage.T5 else '✗', #2713, 2717
+        "CLIP-L"        :   '✓' if SD3Storage.useCL else '✗',
+        "CLIP-G"        :   '✓' if SD3Storage.useCG else '✗',
+        "T5"            :   '✓' if SD3Storage.useT5 else '✗', #2713, 2717
         "zero negative" :   '✓' if SD3Storage.ZN else '✗',
     }
 #add loras list and scales
@@ -72,10 +97,10 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, guidance_r
     generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
     noise_text = f"\nInitial noise: {SD3Storage.noiseRGBA}" if SD3Storage.noiseRGBA[3] != 0.0 else ""
 
-    return f"Model: StableDiffusion3\n{prompt_text}{generation_params_text}{noise_text}"
+    return f"Model: StableDiffusion3m {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, 
-            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, maskSource, maskCutOff, 
+def predict(model, positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, 
+            num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCutOff, 
             controlNet, controlNetImage, controlNetStrength, controlNetStart, controlNetEnd):
     try:
         with open('huggingface_access_token.txt', 'r') as file:
@@ -98,19 +123,33 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         controlNetStrength = 0.0
         useControlNet = None
 
-    if i2iSource != None:
-        if SD3Storage.i2iAllSteps == True:
-            num_steps = int(num_steps / i2iDenoise)
+    ####    check img2img
+    if i2iSource == None:
+        maskType = 0
+        i2iDenoise = 1
+    if maskSource == None:
+        maskType = 0
+    if SD3Storage.i2iAllSteps == True:
+        num_steps = int(num_steps / i2iDenoise)
+        
+    match maskType:
+        case 0:     #   'none'
+            maskSource = None
+            maskBlur = 0
+            maskCutOff = 1.0
+        case 1:     #   'image'
+            maskSource = maskSource['image']
+        case 2:     #   'drawn'
+            maskSource = maskSource['mask']
+        case _:
+            maskSource = None
+            maskBlur = 0
+            maskCutOff = 1.0
 
-        i2iSource = i2iSource.resize((width, height))
-    else:
-        i2iDenoise = 1.0
-        maskSource = None
-
-    if maskSource != None:
-        maskSource = maskSource.resize((int(width/8), int(height/8)))
-    else:
-        maskCutOff = 1.0
+    if maskBlur > 0:
+        maskSource = TF.gaussian_blur(maskSource, 1+2*maskBlur)
+        
+    ####    end check img2img
 
     #   triple prompt, automatic support, no longer needs button to enable
     def promptSplit (prompt):
@@ -149,11 +188,7 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             positive_prompt_3 += styles.styles_list[k][1]
             
     combined_positive = positive_prompt_1 + " | \n" + positive_prompt_2 + " | \n" + positive_prompt_3
-#    combined_positive += ("[repeat 1]" if positive_prompt_2 == positive_prompt_1 else positive_prompt_2) + " |\n"
-#    combined_positive += ("[repeat 1]" if positive_prompt_3 == positive_prompt_1 else ("[repeat 2]" if positive_prompt_3 == positive_prompt_2 else positive_prompt_3))
     combined_negative = negative_prompt_1 + " | \n" + negative_prompt_2 + " | \n" + negative_prompt_3
-#    combined_negative += ("[repeat 1]" if negative_prompt_2 == negative_prompt_1 else negative_prompt_2) + " |\n"
-#    combined_negative += ("[repeat 1]" if negative_prompt_3 == negative_prompt_1 else ("[repeat 2]" if negative_prompt_3 == negative_prompt_2 else negative_prompt_3))
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -167,110 +202,190 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
                        SD3Storage.combined_negative == combined_negative and
                        SD3Storage.redoEmbeds == False and
                        SD3Storage.clipskip == clipskip)
+    #   also shouldn't cache if change model, but how to check if new model has own CLIPs?
+    #   maybe just WON'T FIX, to keep it simple
+
     if useCachedEmbeds:
         print ("Skipping text encoders and tokenizers.")
     else:
-        #do the T5, if enabled
-        if SD3Storage.T5 == True:
+        ####    start T5 text encoder
+        if SD3Storage.useT5 == True:
             tokenizer = T5TokenizerFast.from_pretrained(
                 source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                 subfolder='tokenizer_3',
                 torch_dtype=torch.float16,
                 max_length=512,
                 use_auth_token=access_token,
-                )
+            )
 
-            text_inputs = tokenizer(
+            positive_input_ids = tokenizer(
                 positive_prompt_3,          padding="max_length", max_length=512, truncation=True,
-                add_special_tokens=True,    return_tensors="pt", )
-            positive_input_ids = text_inputs.input_ids
+                add_special_tokens=True,    return_tensors="pt",
+            ).input_ids
 
             if SD3Storage.ZN != True:
-                text_inputs = tokenizer(
+                negative_input_ids = tokenizer(
                     negative_prompt_3,          padding="max_length", max_length=512, truncation=True,
-                    add_special_tokens=True,    return_tensors="pt", )
-                negative_input_ids = text_inputs.input_ids
+                    add_special_tokens=True,    return_tensors="pt",
+                ).input_ids
 
-            del tokenizer, text_inputs
+            del tokenizer
 
-            text_encoder = T5EncoderModel.from_pretrained(
-                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                subfolder='text_encoder_3',
-                torch_dtype=torch.float16,
-                device_map='auto',
-                use_auth_token=access_token,
-            )
-            
-            positive_embeds_3 = text_encoder(positive_input_ids)[0]
+            if SD3Storage.teT5 == None:             #   model not loaded
+                if SD3Storage.noUnload == True:     #   will keep model loaded
+                    device_map = {  #   how to find which blocks are most important? if any?
+                        'shared': 0,
+                        'encoder.embed_tokens': 0,
+                        'encoder.block.0': 'cpu',   'encoder.block.1': 'cpu',   'encoder.block.2': 'cpu',   'encoder.block.3': 'cpu', 
+                        'encoder.block.4': 'cpu',   'encoder.block.5': 'cpu',   'encoder.block.6': 'cpu',   'encoder.block.7': 'cpu', 
+                        'encoder.block.8': 'cpu',   'encoder.block.9': 'cpu',   'encoder.block.10': 'cpu',  'encoder.block.11': 'cpu', 
+                        'encoder.block.12': 'cpu',  'encoder.block.13': 'cpu',  'encoder.block.14': 'cpu',  'encoder.block.15': 'cpu', 
+                        'encoder.block.16': 'cpu',  'encoder.block.17': 'cpu',  'encoder.block.18': 'cpu',  'encoder.block.19': 'cpu', 
+                        'encoder.block.20': 'cpu',  'encoder.block.21': 'cpu',  'encoder.block.22': 'cpu',  'encoder.block.23': 'cpu', 
+                        'encoder.final_layer_norm': 0, 
+                        'encoder.dropout': 0
+                    }
+                else:                               #   will delete model after use
+                    device_map = 'auto'
+
+                SD3Storage.teT5  = T5EncoderModel.from_pretrained(
+                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    subfolder='text_encoder_3',
+                    torch_dtype=torch.float16,
+                    device_map=device_map,
+                    use_auth_token=access_token,
+                )
+            #   if model loaded, then switch off noUnload, loaded model still used (could alter device_map?: model.hf_device_map)
+            #   not a major concern anyway
+
+            positive_embeds_3 = SD3Storage.teT5(positive_input_ids)[0]
 
             if SD3Storage.ZN == True:
-                negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
+                negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
             else:
-                negative_embeds_3 = text_encoder(negative_input_ids)[0]
+                negative_embeds_3 = SD3Storage.teT5(negative_input_ids)[0]
 
-            del text_encoder
+            if SD3Storage.noUnload == False:
+                SD3Storage.teT5 = None
         else:
             #512 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
-            negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cpu', dtype=torch.float16, )
-            #end: T5
+            positive_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
+            negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
+        ####    end T5
 
-    #   CLIPs
-        def doCLIP (positive, negative, tok, te, process):
-            max_length = 77                                     #   tokenizer.model_max_length
-            proj_dim = 768 if te == 'text_encoder' else 1280    #   text_encoder.config.projection_dim
-            joint_attn_dim = 4096                               #   from transformer config
-            if process:
-                tokenizer = CLIPTokenizer.from_pretrained(
-                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                    subfolder=tok,
-                    torch_dtype=torch.float16,
-                    use_auth_token=access_token,
-                )
-                text_inputs = tokenizer(positive, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
-                positive_input_ids = text_inputs.input_ids
-
-                if SD3Storage.ZN != True:
-                    text_inputs = tokenizer(negative, padding="max_length", max_length=max_length, truncation=True, return_tensors="pt", )
-                    negative_input_ids = text_inputs.input_ids
-
-                del tokenizer, text_inputs
-
-                text_encoder = CLIPTextModelWithProjection.from_pretrained(
-                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                    subfolder=te,
-                    torch_dtype=torch.float16,
-                    use_auth_token=access_token,
-                )
-                text_encoder.to('cuda')
-
-                positive_embeds = text_encoder(positive_input_ids.to('cuda'), output_hidden_states=True)
-                pooled_positive = positive_embeds[0]
-                positive_embeds = positive_embeds.hidden_states[-(clipskip + 2)]
-                
-                if SD3Storage.ZN == True:
-                    negative_embeds = torch.zeros((1, max_length, joint_attn_dim),  device='cuda', dtype=torch.float16, )
-                    pooled_negative = torch.zeros((1, proj_dim),                    device='cuda', dtype=torch.float16, )
+        ####    start CLIP-G
+        if SD3Storage.useCG == True:
+            tokenizer = CLIPTokenizer.from_pretrained(
+                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                subfolder='tokenizer',
+                torch_dtype=torch.float16,
+                use_auth_token=access_token,
+            )
+            positive_input_ids = tokenizer(positive_prompt_1, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+            if SD3Storage.ZN != True:
+                negative_input_ids = tokenizer(negative_prompt_1, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+            del tokenizer
+            
+            #   check if custom model has trained CLIPs
+            if model != SD3Storage.lastModel:
+                if model == '(base)':
+                    SD3Storage.teCG = None
                 else:
-                    negative_embeds = text_encoder(negative_input_ids.to('cuda'), output_hidden_states=True)
-                    pooled_negative = negative_embeds[0]
-                    negative_embeds = negative_embeds.hidden_states[-2]
-                del text_encoder
-            else:
-                positive_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
-                negative_embeds = torch.zeros((1, max_length, joint_attn_dim),    device='cuda', dtype=torch.float16, )
-                pooled_positive = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
-                pooled_negative = torch.zeros((1, proj_dim),               device='cuda', dtype=torch.float16, )
-            return positive_embeds, pooled_positive, negative_embeds, pooled_negative
+                    try:    #   maybe custom model has trained CLIPs - not sure if correct way to load
+                        SD3Storage.teCG = CLIPTextModelWithProjection.from_single_file(
+                            model, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                            subfolder='text_encoder',
+                            torch_dtype=torch.float16,
+                            use_auth_token=access_token,
+                        ).to('cuda')
+                    except:
+                        SD3Storage.teCG = None
+            if SD3Storage.teCG == None:             #   model not loaded, use base
+                SD3Storage.teCG = CLIPTextModelWithProjection.from_pretrained(
+                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    subfolder='text_encoder',
+                    low_cpu_mem_usage=True,
+                    torch_dtype=torch.float16,
+                    use_auth_token=access_token,
+                ).to('cuda')
 
-        positive_embeds_1, pooled_positive_embeds_1, negative_embeds_1, pooled_negative_embeds_1 = doCLIP (
-                                                                                                    positive_prompt_1, negative_prompt_1, 
-                                                                                                    'tokenizer',   'text_encoder', 
-                                                                                                    SD3Storage.CG)
-        positive_embeds_2, pooled_positive_embeds_2, negative_embeds_2, pooled_negative_embeds_2 = doCLIP (
-                                                                                                    positive_prompt_2, negative_prompt_2, 
-                                                                                                    'tokenizer_2', 'text_encoder_2', 
-                                                                                                    SD3Storage.CL)
+            positive_embeds = SD3Storage.teCG(positive_input_ids.to('cuda'), output_hidden_states=True)
+            pooled_positive_1 = positive_embeds[0]
+            positive_embeds_1 = positive_embeds.hidden_states[-(clipskip + 2)]
+            
+            if SD3Storage.ZN == True:
+                negative_embeds_1 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+                pooled_negative_1 = torch.zeros((1, 768),       device='cuda', dtype=torch.float16, )
+            else:
+                negative_embeds = SD3Storage.teCG(negative_input_ids.to('cuda'), output_hidden_states=True)
+                pooled_negative_1 = negative_embeds[0]
+                negative_embeds_1 = negative_embeds.hidden_states[-2]
+
+            if SD3Storage.noUnload == False:
+                SD3Storage.teCG = None
+        else:
+            positive_embeds_1 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+            negative_embeds_1 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+            pooled_positive_1 = torch.zeros((1, 768),       device='cuda', dtype=torch.float16, )
+            pooled_negative_1 = torch.zeros((1, 768),       device='cuda', dtype=torch.float16, )
+        ####    end CLIP-G
+
+        ####    start CLIP-L
+        if SD3Storage.useCL == True:
+            tokenizer = CLIPTokenizer.from_pretrained(
+                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                subfolder='tokenizer_2',
+                torch_dtype=torch.float16,
+                use_auth_token=access_token,
+            )
+            positive_input_ids = tokenizer(positive_prompt_2, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+            if SD3Storage.ZN != True:
+                negative_input_ids = tokenizer(negative_prompt_2, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+            del tokenizer
+
+            #   check if custom model has trained CLIPs
+            if model != SD3Storage.lastModel:
+                if model == '(base)':
+                    SD3Storage.teCL = None
+                else:
+                    try:    #   maybe custom model has trained CLIPs - not sure if correct way to load
+                        SD3Storage.teCL = CLIPTextModelWithProjection.from_single_file(
+                            model, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                            subfolder='text_encoder_2',
+                            torch_dtype=torch.float16,
+                            use_auth_token=access_token,
+                        ).to('cuda')
+                    except:
+                        SD3Storage.teCL = None
+            if SD3Storage.teCL == None:             #   model not loaded, use base
+                SD3Storage.teCL = CLIPTextModelWithProjection.from_pretrained(
+                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    subfolder='text_encoder_2',
+                    low_cpu_mem_usage=True,
+                    torch_dtype=torch.float16,
+                    use_auth_token=access_token,
+                ).to('cuda')
+
+            positive_embeds = SD3Storage.teCL(positive_input_ids.to('cuda'), output_hidden_states=True)
+            pooled_positive_2 = positive_embeds[0]
+            positive_embeds_2 = positive_embeds.hidden_states[-(clipskip + 2)]
+            
+            if SD3Storage.ZN == True:
+                negative_embeds_2 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+                pooled_negative_2 = torch.zeros((1, 1280),      device='cuda', dtype=torch.float16, )
+            else:
+                negative_embeds = SD3Storage.teCL(negative_input_ids.to('cuda'), output_hidden_states=True)
+                pooled_negative_2 = negative_embeds[0]
+                negative_embeds_2 = negative_embeds.hidden_states[-2]
+
+            if SD3Storage.noUnload == False:
+                SD3Storage.teCL = None
+        else:
+            positive_embeds_2 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+            negative_embeds_2 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+            pooled_positive_2 = torch.zeros((1, 1280),      device='cuda', dtype=torch.float16, )
+            pooled_negative_2 = torch.zeros((1, 1280),      device='cuda', dtype=torch.float16, )
+        ####    end CLIP-L
 
         #merge
         clip_positive_embeds = torch.cat([positive_embeds_1, positive_embeds_2], dim=-1)
@@ -281,8 +396,8 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         positive_embeds = torch.cat([clip_positive_embeds, positive_embeds_3.to('cuda')], dim=-2)
         negative_embeds = torch.cat([clip_negative_embeds, negative_embeds_3.to('cuda')], dim=-2)
 
-        positive_pooled = torch.cat([pooled_positive_embeds_1, pooled_positive_embeds_2], dim=-1)
-        negative_pooled = torch.cat([pooled_negative_embeds_1, pooled_negative_embeds_2], dim=-1)
+        positive_pooled = torch.cat([pooled_positive_1, pooled_positive_2], dim=-1)
+        negative_pooled = torch.cat([pooled_negative_1, pooled_negative_2], dim=-1)
 
         SD3Storage.positive_embeds = positive_embeds.to('cpu')
         SD3Storage.negative_embeds = negative_embeds.to('cpu')
@@ -295,45 +410,111 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
         del positive_embeds, negative_embeds, positive_pooled, negative_pooled
         del clip_positive_embeds, clip_negative_embeds
-        del pooled_positive_embeds_1, pooled_positive_embeds_2, pooled_negative_embeds_1, pooled_negative_embeds_2
+        del pooled_positive_1, pooled_positive_2, pooled_negative_1, pooled_negative_2
         del positive_embeds_1, positive_embeds_2, positive_embeds_3
         del negative_embeds_1, negative_embeds_2, negative_embeds_3
 
         gc.collect()
         torch.cuda.empty_cache()
 
+    ####    end useCachedEmbeds
+
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(source,
                                                                 subfolder='scheduler', local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                                                                 shift=shift,
                                                                 token=access_token,
                                                                 )
+    if useControlNet:
+        if useControlNet != SD3Storage.lastControlNet:
+            controlnet=SD3ControlNetModel.from_pretrained(
+                useControlNet, cache_dir=".//models//diffusers//", torch_dtype=torch.float16)
+    else:
+        controlnet = None
 
-    pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
-        source,
-        local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-        torch_dtype=torch.float16,
-#        tokenizer  =None,   text_encoder  =None,
-#        tokenizer_2=None,   text_encoder_2=None,
-#        tokenizer_3=None,   text_encoder_3=None,
-        scheduler=scheduler,
-        token=access_token,
-        controlnet=SD3ControlNetModel.from_pretrained(useControlNet, cache_dir=".//models//diffusers//", torch_dtype=torch.float16) if useControlNet else None
-    )
-    del scheduler
+    if SD3Storage.pipe == None:
+        if model == '(base)':
+            SD3Storage.pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
+                source,
+                local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,                
+                use_safetensors=True,
+                scheduler=scheduler,
+                token=access_token,
+                controlnet=controlnet
+            )
+        else:
+            customModel = './/models//diffusers//SD3Custom//' + model + '.safetensors'
+            SD3Storage.pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
+                source,
+                local_files_only=True, cache_dir=".//models//diffusers//",
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,                
+                use_safetensors=True,
+                transformer=SD3Transformer2DModel.from_single_file(customModel, local_files_only=True, low_cpu_mem_usage=True, torch_dtype=torch.float16),
+                scheduler=scheduler,
+                token=access_token,
+                controlnet=controlnet
+            )
+        SD3Storage.lastModel = model
+#        if SD3Storage.noUnload:        #   use for low VRAM only
+#            SD3Storage.pipe.enable_sequential_cpu_offload()
+#        else:
+#            SD3Storage.pipe.to('cuda')
 
-    pipe.enable_model_cpu_offload() #   implies .to('cuda') as necessary
-    pipe.vae.enable_slicing()       #   tiling works once only?
+        SD3Storage.pipe.enable_model_cpu_offload()
+        SD3Storage.pipe.vae.to(memory_format=torch.channels_last)
+    else:
+        SD3Storage.pipe.scheduler = scheduler
+        if SD3Storage.noUnload:
+            if useControlNet != SD3Storage.lastControlNet:
+                SD3Storage.pipe.controlnet = controlnet
+                SD3Storage.lastControlNet = useControlNet
+
+    del scheduler, controlnet
+
+    if model != SD3Storage.lastModel:
+        del SD3Storage.pipe.transformer
+        if model == '(base)':
+            SD3Storage.pipe.transformer=SD3Transformer2DModel.from_pretrained(
+                source,
+                subfolder='transformer',
+                low_cpu_mem_usage=True, 
+                torch_dtype=torch.float16
+            )
+        else:
+            customModel = './/models//diffusers//SD3Custom//' + model + '.safetensors'
+            SD3Storage.pipe.transformer=SD3Transformer2DModel.from_single_file(
+                customModel,
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.float16
+            )
+            
+        SD3Storage.model = model
+#        if SD3Storage.noUnload:    #for low VRAM only
+#            SD3Storage.pipe.enable_sequential_cpu_offload()
+        SD3Storage.pipe.enable_model_cpu_offload()
+
+    SD3Storage.pipe.transformer.to(memory_format=torch.channels_last)
 
     shape = (
         num_images,
-        pipe.transformer.config.in_channels,
-        int(height) // pipe.vae_scale_factor,
-        int(width) // pipe.vae_scale_factor,
+        SD3Storage.pipe.transformer.config.in_channels,
+        int(height) // SD3Storage.pipe.vae_scale_factor,
+        int(width) // SD3Storage.pipe.vae_scale_factor,
     )
 
     #   always generate the noise here
     generator = [torch.Generator(device='cpu').manual_seed(fixed_seed+i) for i in range(num_images)]
     latents = randn_tensor(shape, generator=generator).to('cuda').to(torch.float16)
+
+    if SD3Storage.sharpNoise:
+        minDim = 1 + 2*(min(latents.size(2), latents.size(3)) // 4)
+        for b in range(len(latents)):
+            blurred = TF.gaussian_blur(latents[b], minDim)
+            latents[b] = 1.05*latents[b] - 0.05*blurred
+
     #regen the generator to minimise differences between single/batch - might still be different - batch processing could use different pytorch kernels
     del generator
     generator = torch.Generator(device='cpu').manual_seed(14641)
@@ -349,8 +530,8 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         imageB = torch.tensor(numpy.full((8,8), (nb), dtype=numpy.float32))
         image = torch.stack((imageR, imageG, imageB), dim=0).unsqueeze(0)
 
-        image = pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
-        image_latents = (pipe.vae.encode(image).latent_dist.sample(generator) - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+        image = SD3Storage.pipe.image_processor.preprocess(image).to('cuda').to(torch.float16)
+        image_latents = (SD3Storage.pipe.vae.encode(image).latent_dist.sample(generator) - SD3Storage.pipe.vae.config.shift_factor) * SD3Storage.pipe.vae.config.scaling_factor
 
         image_latents = image_latents.repeat(num_images, 1, latents.size(2), latents.size(3))
 
@@ -364,12 +545,12 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
     #   end: colour the initial noise
 
 
-
 #   load in LoRA, weight passed to pipe
     if SD3Storage.lora and SD3Storage.lora != "(None)" and SD3Storage.lora_scale != 0.0:
         lorafile = ".//models/diffusers//SD3Lora//" + SD3Storage.lora + ".safetensors"
         try:
-            pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
+            SD3Storage.pipe.load_lora_weights(lorafile, local_files_only=True, adapter_name=SD3Storage.lora)
+            SD3Storage.loadedLora = True
 #            pipe.set_adapters(SD3Storage.lora, adapter_weights=SD3Storage.lora_scale)    #.set_adapters doesn't exist so no easy multiple LoRAs and weights
         except:
             print ("Failed: LoRA: " + lorafile)
@@ -381,11 +562,11 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 #    print (pipe.scheduler.compatibles)
 
-    pipe.transformer.to(memory_format=torch.channels_last)
-    pipe.vae.to(memory_format=torch.channels_last)
+    SD3Storage.pipe.transformer.to(memory_format=torch.channels_last)
+    SD3Storage.pipe.vae.to(memory_format=torch.channels_last)
 
     with torch.inference_mode():
-        output = pipe(
+        output = SD3Storage.pipe(
             num_inference_steps             = num_steps,
             guidance_scale                  = guidance_scale,
             guidance_rescale                = guidance_rescale,
@@ -395,7 +576,6 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             pooled_prompt_embeds            = SD3Storage.positive_pooled.to('cuda'),
             negative_pooled_prompt_embeds   = SD3Storage.negative_pooled.to('cuda'),
             num_images_per_prompt           = num_images,
-            output_type                     = "pil",
             generator                       = generator,
             latents                         = latents,
 
@@ -410,13 +590,25 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
             control_guidance_end            = controlNetEnd,
             
             joint_attention_kwargs          = {"scale": SD3Storage.lora_scale }
-        ).images
+        )
         del controlNetImage, i2iSource
 
-    del pipe, generator, latents
+    del generator, latents
+
+    if SD3Storage.noUnload:
+        if SD3Storage.loadedLora == True:
+            SD3Storage.pipe.unload_lora_weights()
+            SD3Storage.loadedLora = False
+        SD3Storage.pipe.transformer.to('cpu')
+#        SD3Storage.pipe.controlnet.to('cpu')
+    else:
+        SD3Storage.pipe.transformer = None
+        SD3Storage.pipe.controlnet = None
 
     gc.collect()
     torch.cuda.empty_cache()
+
+#    SD3Storage.pipe.vae.enable_slicing()       #   tiling works once only?
 
     if SD3Storage.lora != "(None)" and SD3Storage.lora_scale != 0.0:
         loraSettings = SD3Storage.lora + f" ({SD3Storage.lora_scale})"
@@ -427,14 +619,19 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         useControlNet += f" strength: {controlNetStrength}; step range: {controlNetStart}-{controlNetEnd}"
 
     result = []
-    for image in output:
+    for latentImage in output:
         info=create_infotext(
-            combined_positive, combined_negative, 
+            model, combined_positive, combined_negative, 
             guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, num_steps, 
             fixed_seed, 
             width, height,
             loraSettings,
-            useControlNet)
+            useControlNet)      #   doing this for every image when only change is fixed_seed
+
+        #   manually handling the VAE prevents hitting shared memory on 8GB
+        latent = (latentImage / SD3Storage.pipe.vae.config.scaling_factor) + SD3Storage.pipe.vae.config.shift_factor
+        image = SD3Storage.pipe.vae.decode(latent, return_dict=False)[0]
+        image = SD3Storage.pipe.image_processor.postprocess(image, output_type='pil')[0]
 
         result.append((image, info))
         
@@ -449,6 +646,9 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
         )
         fixed_seed += 1
 
+    if not SD3Storage.noUnload:
+        SD3Storage.pipe = None
+    
     del output
     gc.collect()
     torch.cuda.empty_cache()
@@ -458,6 +658,10 @@ def predict(positive_prompt, negative_prompt, width, height, guidance_scale, gui
 
 
 def on_ui_tabs():
+    if SD3Storage.ModuleReload:
+        reload(styles)
+        reload(pipeline)
+
     def buildLoRAList ():
         loras = ["(None)"]
         
@@ -469,12 +673,27 @@ def on_ui_tabs():
             loras.append(filename[0:-12])
 
         return loras
+    def buildModelList ():
+        models = ["(base)"]
+        
+        import glob
+        customModel = glob.glob(".\models\diffusers\SD3Custom\*.safetensors")
+
+        for i in customModel:
+            filename = i.split('\\')[-1]
+            models.append(filename[0:-12])
+
+        return models
 
     loras = buildLoRAList ()
+    models = buildModelList ()
 
     def refreshLoRAs ():
         loras = buildLoRAList ()
         return gradio.Dropdown.update(choices=loras)
+    def refreshModels ():
+        models = buildModelList ()
+        return gradio.Dropdown.update(choices=models)
    
     def getGalleryIndex (evt: gradio.SelectData):
         SD3Storage.galleryIndex = evt.index
@@ -557,21 +776,38 @@ def on_ui_tabs():
         return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.LFO])
 
     #   these are volatile state, should not be changed during generation
+    def toggleNU ():
+        if not SD3Storage.locked:
+            SD3Storage.noUnload ^= True
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.noUnload])
+    def unloadM ():
+        if not SD3Storage.locked:
+            SD3Storage.teT5 = None
+            SD3Storage.teCG = None
+            SD3Storage.teCL = None
+            SD3Storage.pipe = None
+            SD3Storage.lastModel = None
+            SD3Storage.lastControlNet = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        else:
+            gradio.Info('Unable to unload models while using them.')
+
     def toggleCL ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
-            SD3Storage.CL ^= True
-        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.CL])
+            SD3Storage.useCL ^= True
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.useCL])
     def toggleCG ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
-            SD3Storage.CG ^= True
-        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.CG])
+            SD3Storage.useCG ^= True
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.useCG])
     def toggleT5 ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
-            SD3Storage.T5 ^= True
-        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.T5])
+            SD3Storage.useT5 ^= True
+        return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.useT5])
     def toggleZN ():
         if not SD3Storage.locked:
             SD3Storage.redoEmbeds = True
@@ -581,6 +817,40 @@ def on_ui_tabs():
         if not SD3Storage.locked:
             SD3Storage.i2iAllSteps ^= True
         return gradio.Button.update(variant=['secondary', 'primary'][SD3Storage.i2iAllSteps])
+    def toggleSP ():
+        if not SD3Storage.locked:
+            return gradio.Button.update(variant='primary')
+    def superPrompt (prompt, seed):
+        tokenizer = getattr (shared, 'SuperPrompt_tokenizer', None)
+        superprompt = getattr (shared, 'SuperPrompt_model', None)
+        if tokenizer is None:
+            tokenizer = T5TokenizerFast.from_pretrained(
+                'roborovski/superprompt-v1',
+                cache_dir='.//models//diffusers//',
+            )
+            shared.SuperPrompt_tokenizer = tokenizer
+        if superprompt is None:
+            superprompt = T5ForConditionalGeneration.from_pretrained(
+                'roborovski/superprompt-v1',
+                cache_dir='.//models//diffusers//',
+                device_map='auto',
+                torch_dtype=torch.float16
+            )
+            shared.SuperPrompt_model = superprompt
+            print("SuperPrompt-v1 model loaded successfully.")
+            if torch.cuda.is_available():
+                superprompt.to('cuda')
+
+        torch.manual_seed(get_fixed_seed(seed))
+        device = superprompt.device
+        systemprompt1 = "Expand the following prompt to add more detail: "
+        
+        input_ids = tokenizer(systemprompt1 + prompt, return_tensors="pt").input_ids.to(device)
+        outputs = superprompt.generate(input_ids, max_new_tokens=256, repetition_penalty=1.2, do_sample=True)
+        dirty_text = tokenizer.decode(outputs[0])
+        result = dirty_text.replace("<pad>", "").replace("</s>", "").strip()
+        
+        return gradio.Button.update(variant='secondary'), result
 
     resolutionList = [
         (1536, 672),    (1344, 768),    (1248, 832),    (1120, 896),
@@ -728,41 +998,63 @@ def on_ui_tabs():
 
 
     def refreshStyles (style):
-        reload(styles)
+        if SD3Storage.ModuleReload:
+            reload(styles)
         
-        newList = [x[0] for x in styles.styles_list]
-        newStyle = []
+            newList = [x[0] for x in styles.styles_list]
+            newStyle = []
         
-        for s in style:
-            if s in newList:
-                newStyle.append(s)
+            for s in style:
+                if s in newList:
+                    newStyle.append(s)
 
-        return gradio.Dropdown.update(choices=newList, value=newStyle)
+            return gradio.Dropdown.update(choices=newList, value=newStyle)
+        else:
+            return gradio.Dropdown.update(value=style)
+            
 
+    def toggleSharp ():
+        if not SD3Storage.locked:
+            SD3Storage.sharpNoise ^= True
+        return gradio.Button.update(value=['s', 'S'][SD3Storage.sharpNoise],
+                                variant=['secondary', 'primary'][SD3Storage.sharpNoise])
+
+    def maskFromImage (image):
+        if image:
+            return image, 'drawn'
+        else:
+            return None, 'none'
 
     with gradio.Blocks() as sd3_block:
         with ResizeHandleRow():
             with gradio.Column():
-#                with gradio.Row():
 #                    LFO = ToolButton(value='lfo', variant='secondary', tooltip='local files only')
+
                 with gradio.Row():
-                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                    model = gradio.Dropdown(models, label='Model', value='(base)', type='value')
+                    refreshM = ToolButton(value='\U0001f504')
+                    nouse0 = ToolButton(value="️|", variant='tertiary', tooltip='', interactive=False)
                     CL = ToolButton(value='CL', variant='primary',   tooltip='use CLIP-L text encoder')
                     CG = ToolButton(value='CG', variant='primary',   tooltip='use CLIP-G text encoder')
                     T5 = ToolButton(value='T5', variant='secondary', tooltip='use T5 text encoder')
+                    nouseC = ToolButton(value="️|", variant='tertiary', tooltip='', interactive=False)
                     ZN = ToolButton(value='ZN', variant='secondary', tooltip='zero out negative embeds')
+                    nouseB = ToolButton(value="️|", variant='tertiary', tooltip='', interactive=False)
+                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
+
+                with gradio.Row():
+                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
+                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
                 with gradio.Row():
                     negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.01)
                     randNeg = ToolButton(value='rng', variant='secondary', tooltip='random negative')
-                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
 
                 with gradio.Row():
                     style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value=None, type='value', multiselect=True)
                     strfh = ToolButton(value="🔄", variant='secondary', tooltip='reload styles')
                     st2pr = ToolButton(value="📋", variant='secondary', tooltip='add style to prompt')
 #make infotext from all settings, send to clipboard?
-                    nouse = ToolButton(value="️", variant='tertiary', tooltip='', interactive=False)
-                    parse = ToolButton(value="↙️", variant='secondary', tooltip='parse')
 
                 with gradio.Row():
                     width = gradio.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
@@ -785,7 +1077,7 @@ def on_ui_tabs():
 
                 with gradio.Row(equal_height=True):
                     lora = gradio.Dropdown([x for x in loras], label='LoRA (place in models/diffusers/SD3Lora)', value="(None)", type='value', multiselect=False, scale=1)
-                    refresh = ToolButton(value='\U0001f504')
+                    refreshL = ToolButton(value='\U0001f504')
                     scale = gradio.Slider(label='LoRA weight', minimum=-1.0, maximum=1.0, value=1.0, step=0.01, scale=1)
 
                 with gradio.Accordion(label='the colour of noise', open=False):
@@ -794,6 +1086,7 @@ def on_ui_tabs():
                         initialNoiseG = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='green')
                         initialNoiseB = gradio.Slider(minimum=0, maximum=1.0, value=0.0, step=0.01,  label='blue')
                         initialNoiseA = gradio.Slider(minimum=0, maximum=0.1, value=0.0, step=0.001, label='strength')
+                        sharpNoise = ToolButton(value="s", variant='secondary', tooltip='Sharpen initial noise')
 
                 with gradio.Accordion(label='ControlNet', open=False):
                     with gradio.Row():
@@ -806,22 +1099,31 @@ def on_ui_tabs():
 
                 with gradio.Accordion(label='image to image', open=False):
                     with gradio.Row():
-                        i2iSource = gradio.Image(label='source image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        i2iSource = gradio.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False, tool='sketch', image_mode='RGB', brush_color='#F0F0F0')#opts.img2img_inpaint_mask_brush_color)
+                    with gradio.Row():
                         with gradio.Column():
                             with gradio.Row():
                                 i2iDenoise = gradio.Slider(label='Denoise', minimum=0.00, maximum=1.0, step=0.01, value=0.5)
                                 AS = ToolButton(value='AS')
- 
-                            i2iSetWH = gradio.Button(value='Set Width / Height from image')
-                            i2iFromGallery = gradio.Button(value='Get image from gallery')
                             with gradio.Row():
-                                i2iCaption = gradio.Button(value='Caption this image (Florence-2)', scale=7)
+                                i2iFromGallery = gradio.Button(value='Get gallery image')
+                                i2iSetWH = gradio.Button(value='Set size from image')
+                            with gradio.Row():
+                                i2iCaption = gradio.Button(value='Caption image (Florence-2)', scale=6)
                                 toPrompt = ToolButton(value='P', variant='secondary')
-                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
 
-                ctrls = [positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, CFGcutoff, shift, clipskip, steps, sampling_seed,
-                         batch_size, style, i2iSource, i2iDenoise, maskSource, maskCut, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
+                        with gradio.Column():
+                            maskType = gradio.Dropdown(['none', 'image', 'drawn'], value='none', label='Mask', type='index')
+                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
+                            maskBlur = gradio.Slider(label='Blur mask radius', minimum=0, maximum=25, step=1, value=0)
+                            maskCopy = gradio.Button(value='use i2i source as template')
+
+                with gradio.Row():
+                    noUnload = gradio.Button(value='keep models loaded', variant='primary' if SD3Storage.noUnload else 'secondary', tooltip='noUnload', scale=1)
+                    unloadModels = gradio.Button(value='unload models', tooltip='force unload of models', scale=1)
+
+                ctrls = [model, positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, CFGcutoff, shift, clipskip, steps, sampling_seed, batch_size, style, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCut, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
                 parseable = [positive_prompt, negative_prompt, width, height, sampling_seed, steps, guidance_scale, CFGrescale, CFGcutoff, shift, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale]
 
             with gradio.Column():
@@ -840,12 +1142,19 @@ def on_ui_tabs():
                         source_text_component=positive_prompt,
                         source_image_component=output_gallery,
                     ))
+        noUnload.click(toggleNU, inputs=[], outputs=noUnload)
+        unloadModels.click(unloadM, inputs=[], outputs=[], show_progress=True)
                     
+        SP.click(toggleSP, inputs=[], outputs=SP)
+        SP.click(superPrompt, inputs=[positive_prompt, sampling_seed], outputs=[SP, positive_prompt])
+        maskCopy.click(fn=maskFromImage, inputs=[i2iSource], outputs=[maskSource, maskType])
+        sharpNoise.click(toggleSharp, inputs=[], outputs=sharpNoise)
         strfh.click(refreshStyles, inputs=[style], outputs=[style])
         st2pr.click(style2prompt, inputs=[positive_prompt, style], outputs=[positive_prompt, style])
         parse.click(parsePrompt, inputs=parseable, outputs=parseable, show_progress=False)
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
-        refresh.click(refreshLoRAs, inputs=[], outputs=[lora])
+        refreshM.click(refreshModels, inputs=[], outputs=[model])
+        refreshL.click(refreshLoRAs, inputs=[], outputs=[lora])
         CL.click(toggleCL, inputs=[], outputs=CL)
         CG.click(toggleCG, inputs=[], outputs=CG)
         T5.click(toggleT5, inputs=[], outputs=T5)

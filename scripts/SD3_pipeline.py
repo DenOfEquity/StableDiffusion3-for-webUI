@@ -1,3 +1,5 @@
+####    THIS IS main BRANCH (only difference - delete transformer after use)
+
 # Copyright 2024 Stability AI and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,7 +38,7 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.stable_diffusion_3.pipeline_output import StableDiffusion3PipelineOutput
+#from diffusers.pipelines.stable_diffusion_3.pipeline_output import StableDiffusion3PipelineOutput
 from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 
 if is_torch_xla_available():
@@ -115,12 +117,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 
         self.register_modules(
             vae=vae,
-#            text_encoder=text_encoder,
-#            text_encoder_2=text_encoder_2,
-#            text_encoder_3=text_encoder_3,
-#            tokenizer=tokenizer,
-#            tokenizer_2=tokenizer_2,
-#            tokenizer_3=tokenizer_3,
             transformer=transformer,
             scheduler=scheduler,
             controlnet=controlnet,
@@ -296,13 +292,12 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
 
-        control_guidance_start: Union[float, List[float]] = 0.0,
-        control_guidance_end: Union[float, List[float]] = 1.0,
+        control_guidance_start: float = 0.0,
+        control_guidance_end: float = 1.0,
         control_image: PipelineImageInput = None,
         controlnet_conditioning_scale: Union[float, List[float]] = 1.0,
         controlnet_pooled_projections: Optional[torch.FloatTensor] = None,
@@ -313,19 +308,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 
         doDiffDiff = True if (image and mask_image) else False
         doInPaint = False if (image and mask_image) else False
-
-        # align format for control guidance
-        if not isinstance(control_guidance_start, list) and isinstance(control_guidance_end, list):
-            control_guidance_start = len(control_guidance_end) * [control_guidance_start]
-        elif not isinstance(control_guidance_end, list) and isinstance(control_guidance_start, list):
-            control_guidance_end = len(control_guidance_start) * [control_guidance_end]
-        elif not isinstance(control_guidance_start, list) and not isinstance(control_guidance_end, list):
-            mult = len(self.controlnet.nets) if isinstance(self.controlnet, SD3MultiControlNetModel) else 1
-            control_guidance_start, control_guidance_end = (
-                mult * [control_guidance_start],
-                mult * [control_guidance_end],
-            )
-
 
         # 0.01 repeat prompt embeds to match num_images_per_prompt
         prompt_embeds = prompt_embeds.repeat(num_images_per_prompt, 1, 1)
@@ -412,8 +394,9 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 
             if mask_image is not None:
                 # 5.1. Prepare masked latent variables
-                #### mask_image already resized /8 at start of predict()
-                mask = self.mask_processor.preprocess(mask_image).to(device='cuda', dtype=torch.float16)
+                w = latents.size(3)
+                h = latents.size(2)
+                mask = self.mask_processor.preprocess(mask_image.resize((w,h))).to(device='cuda', dtype=torch.float16)
 
 ####    with real inpaint model:
 ####                mask_condition = self.mask_processor.preprocess(mask_image)
@@ -422,18 +405,6 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 ####                mask_condition, masked_image,
 ####                num_images_per_prompt,
 ####                prompt_embeds.dtype, device, generator )                
-
-        # 6a. Create tensor stating which controlnets to keep
-        #is this necessary? why not use start/end directly?
-        if self.controlnet != None:
-            controlnet_keep = []
-            for i in range(len(timesteps)):
-                keeps = [
-                    1.0 - float((i+1) / len(timesteps) < s or (i + 1) / len(timesteps) > e)
-                    for s, e in zip(control_guidance_start, control_guidance_end)
-                ]
-                controlnet_keep.append(keeps[0] if isinstance(self.controlnet, SD3ControlNetModel) else keeps)
-
 
         # 6. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
@@ -471,13 +442,10 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
 ####                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
                 if self.controlnet != None:
-                    if isinstance(controlnet_keep[i], list):
-                        cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
+                    if float((i+1) / len(timesteps)) >= control_guidance_start and float((i+1) / len(timesteps)) <= control_guidance_end:
+                        cond_scale = controlnet_conditioning_scale
                     else:
-                        controlnet_cond_scale = controlnet_conditioning_scale
-                        if isinstance(controlnet_cond_scale, list):
-                            controlnet_cond_scale = controlnet_cond_scale[0]
-                        cond_scale = controlnet_cond_scale * controlnet_keep[i]
+                        cond_scale = 0.0
 
                     # controlnet(s) inference
                     control_block_samples = self.controlnet(
@@ -548,18 +516,7 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
             tmask = (mask >= 1.0)
             latents = (image_latents * ~tmask) + (latents * tmask)
 
-        if output_type == "latent":
-            image = latents
-        else:
-            latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-
-            image = self.vae.decode(latents, return_dict=False)[0]
-            image = self.image_processor.postprocess(image, output_type=output_type)
-
         # Offload all models
         self.maybe_free_model_hooks()
 
-        if not return_dict:
-            return (image,)
-
-        return StableDiffusion3PipelineOutput(images=image)
+        return (latents,)

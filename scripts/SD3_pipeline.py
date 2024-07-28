@@ -519,4 +519,4 @@ class SD3Pipeline_DoE_combined (DiffusionPipeline, SD3LoraLoaderMixin, FromSingl
         # Offload all models
         self.maybe_free_model_hooks()
 
-        return (latents,)
+        return latents

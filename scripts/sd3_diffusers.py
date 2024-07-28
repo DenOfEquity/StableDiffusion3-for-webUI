@@ -1,4 +1,4 @@
-#### THIS IS THE main BRANCH - deletes models after use
+#### THIS IS THE main BRANCH - deletes models after use / keep loaded now optional
 
 #todo: check VRAM, different paths
 #   low <= 6GB enable_sequential_model_offload() on pipe
@@ -206,7 +206,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     #   maybe just WON'T FIX, to keep it simple
 
     if useCachedEmbeds:
-        print ("Skipping text encoders and tokenizers.")
+        print ("SD3: Skipping text encoders and tokenizers.")
     else:
         ####    start T5 text encoder
         if SD3Storage.useT5 == True:
@@ -218,16 +218,13 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 use_auth_token=access_token,
             )
 
-            positive_input_ids = tokenizer(
-                positive_prompt_3,          padding="max_length", max_length=512, truncation=True,
+            input_ids = tokenizer(
+                [positive_prompt_3, negative_prompt_3],          padding=True, max_length=512, truncation=True,
                 add_special_tokens=True,    return_tensors="pt",
             ).input_ids
 
-            if SD3Storage.ZN != True:
-                negative_input_ids = tokenizer(
-                    negative_prompt_3,          padding="max_length", max_length=512, truncation=True,
-                    add_special_tokens=True,    return_tensors="pt",
-                ).input_ids
+            # positive_input_ids = input_ids[0:1]
+            # negative_input_ids = input_ids[1:]
 
             del tokenizer
 
@@ -236,7 +233,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                     device_map = {  #   how to find which blocks are most important? if any?
                         'shared': 0,
                         'encoder.embed_tokens': 0,
-                        'encoder.block.0': 'cpu',   'encoder.block.1': 'cpu',   'encoder.block.2': 'cpu',   'encoder.block.3': 'cpu', 
+                        'encoder.block.0': 0,   'encoder.block.1': 0,   'encoder.block.2': 0,   'encoder.block.3': 0, 
                         'encoder.block.4': 'cpu',   'encoder.block.5': 'cpu',   'encoder.block.6': 'cpu',   'encoder.block.7': 'cpu', 
                         'encoder.block.8': 'cpu',   'encoder.block.9': 'cpu',   'encoder.block.10': 'cpu',  'encoder.block.11': 'cpu', 
                         'encoder.block.12': 'cpu',  'encoder.block.13': 'cpu',  'encoder.block.14': 'cpu',  'encoder.block.15': 'cpu', 
@@ -248,6 +245,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 else:                               #   will delete model after use
                     device_map = 'auto'
 
+                print ("SD3: loading T5 ...", end="\r", flush=True)
                 SD3Storage.teT5  = T5EncoderModel.from_pretrained(
                     source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
                     subfolder='text_encoder_3',
@@ -258,19 +256,32 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             #   if model loaded, then switch off noUnload, loaded model still used (could alter device_map?: model.hf_device_map)
             #   not a major concern anyway
 
-            positive_embeds_3 = SD3Storage.teT5(positive_input_ids)[0]
-
+            print ("SD3: encoding prompt (T5) ...", end="\r", flush=True)
+            embeds_3 = SD3Storage.teT5(input_ids.to('cuda'))[0]
+            positive_embeds_3 = embeds_3[0].unsqueeze(0)
             if SD3Storage.ZN == True:
-                negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
+                negative_embeds_3 = torch.zeros_like(positive_embeds_3)
             else:
-                negative_embeds_3 = SD3Storage.teT5(negative_input_ids)[0]
+                negative_embeds_3 = embeds_3[1].unsqueeze(0)
+                
+            del input_ids, embeds_3
+            
+            # positive_embeds_3 = SD3Storage.teT5(positive_input_ids)[0]
+
+            # if SD3Storage.ZN == True:
+              # negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
+                # negative_embeds_3 = torch.zeros_like(positive_embeds_3)
+            # else:
+                # negative_embeds_3 = SD3Storage.teT5(negative_input_ids)[0]
 
             if SD3Storage.noUnload == False:
                 SD3Storage.teT5 = None
+            print ("SD3: encoding prompt (T5) ... done")
         else:
-            #512 is tokenizer max length from config; 4096 is transformer joint_attention_dim from its config
-            positive_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
-            negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
+            #dim 1 (512) is tokenizer max length from config; dim 2 (4096) is transformer joint_attention_dim from its config
+            #why max_length - it's not used, so make it small (or None)
+            positive_embeds_3 = torch.zeros((1, 1, 4096),    device='cuda', dtype=torch.float16, )
+            negative_embeds_3 = torch.zeros((1, 1, 4096),    device='cuda', dtype=torch.float16, )
         ####    end T5
 
         ####    start CLIP-G
@@ -281,9 +292,15 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 torch_dtype=torch.float16,
                 use_auth_token=access_token,
             )
-            positive_input_ids = tokenizer(positive_prompt_1, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
-            if SD3Storage.ZN != True:
-                negative_input_ids = tokenizer(negative_prompt_1, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+
+            input_ids = tokenizer(
+                [positive_prompt_1, negative_prompt_1],          padding=True, max_length=77, truncation=True,
+                return_tensors="pt",
+            ).input_ids
+
+            positive_input_ids = input_ids[0:1]
+            negative_input_ids = input_ids[1:]
+
             del tokenizer
             
             #   check if custom model has trained CLIPs
@@ -297,7 +314,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                             subfolder='text_encoder',
                             torch_dtype=torch.float16,
                             use_auth_token=access_token,
-                        ).to('cuda')
+                        )
                     except:
                         SD3Storage.teCG = None
             if SD3Storage.teCG == None:             #   model not loaded, use base
@@ -307,14 +324,16 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                     low_cpu_mem_usage=True,
                     torch_dtype=torch.float16,
                     use_auth_token=access_token,
-                ).to('cuda')
+                )
+
+            SD3Storage.teCG.to('cuda')
 
             positive_embeds = SD3Storage.teCG(positive_input_ids.to('cuda'), output_hidden_states=True)
             pooled_positive_1 = positive_embeds[0]
             positive_embeds_1 = positive_embeds.hidden_states[-(clipskip + 2)]
             
             if SD3Storage.ZN == True:
-                negative_embeds_1 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+                negative_embeds_1 = torch.zeros_like(positive_embeds_1)
                 pooled_negative_1 = torch.zeros((1, 768),       device='cuda', dtype=torch.float16, )
             else:
                 negative_embeds = SD3Storage.teCG(negative_input_ids.to('cuda'), output_hidden_states=True)
@@ -323,11 +342,14 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
 
             if SD3Storage.noUnload == False:
                 SD3Storage.teCG = None
+            else:
+                SD3Storage.teCG.to('cpu')
+                
         else:
-            positive_embeds_1 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
-            negative_embeds_1 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
-            pooled_positive_1 = torch.zeros((1, 768),       device='cuda', dtype=torch.float16, )
-            pooled_negative_1 = torch.zeros((1, 768),       device='cuda', dtype=torch.float16, )
+            positive_embeds_1 = torch.zeros((1, 1, 4096),  device='cuda', dtype=torch.float16, )
+            negative_embeds_1 = torch.zeros((1, 1, 4096),  device='cuda', dtype=torch.float16, )
+            pooled_positive_1 = torch.zeros((1, 768),      device='cuda', dtype=torch.float16, )
+            pooled_negative_1 = torch.zeros((1, 768),      device='cuda', dtype=torch.float16, )
         ####    end CLIP-G
 
         ####    start CLIP-L
@@ -338,9 +360,14 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 torch_dtype=torch.float16,
                 use_auth_token=access_token,
             )
-            positive_input_ids = tokenizer(positive_prompt_2, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
-            if SD3Storage.ZN != True:
-                negative_input_ids = tokenizer(negative_prompt_2, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+            input_ids = tokenizer(
+                [positive_prompt_2, negative_prompt_2],          padding=True, max_length=77, truncation=True,
+                return_tensors="pt",
+            ).input_ids
+
+            positive_input_ids = input_ids[0:1]
+            negative_input_ids = input_ids[1:]
+
             del tokenizer
 
             #   check if custom model has trained CLIPs
@@ -354,7 +381,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                             subfolder='text_encoder_2',
                             torch_dtype=torch.float16,
                             use_auth_token=access_token,
-                        ).to('cuda')
+                        )
                     except:
                         SD3Storage.teCL = None
             if SD3Storage.teCL == None:             #   model not loaded, use base
@@ -364,14 +391,16 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                     low_cpu_mem_usage=True,
                     torch_dtype=torch.float16,
                     use_auth_token=access_token,
-                ).to('cuda')
+                )
+
+            SD3Storage.teCL.to('cuda')
 
             positive_embeds = SD3Storage.teCL(positive_input_ids.to('cuda'), output_hidden_states=True)
             pooled_positive_2 = positive_embeds[0]
             positive_embeds_2 = positive_embeds.hidden_states[-(clipskip + 2)]
             
             if SD3Storage.ZN == True:
-                negative_embeds_2 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
+                negative_embeds_2 = torch.zeros_like(positive_embeds_2)
                 pooled_negative_2 = torch.zeros((1, 1280),      device='cuda', dtype=torch.float16, )
             else:
                 negative_embeds = SD3Storage.teCL(negative_input_ids.to('cuda'), output_hidden_states=True)
@@ -380,11 +409,14 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
 
             if SD3Storage.noUnload == False:
                 SD3Storage.teCL = None
+            else:
+                SD3Storage.teCL.to('cpu')
+
         else:
-            positive_embeds_2 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
-            negative_embeds_2 = torch.zeros((1, 77, 4096),  device='cuda', dtype=torch.float16, )
-            pooled_positive_2 = torch.zeros((1, 1280),      device='cuda', dtype=torch.float16, )
-            pooled_negative_2 = torch.zeros((1, 1280),      device='cuda', dtype=torch.float16, )
+            positive_embeds_2 = torch.zeros((1, 1, 4096),  device='cuda', dtype=torch.float16, )
+            negative_embeds_2 = torch.zeros((1, 1, 4096),  device='cuda', dtype=torch.float16, )
+            pooled_positive_2 = torch.zeros((1, 1280),     device='cuda', dtype=torch.float16, )
+            pooled_negative_2 = torch.zeros((1, 1280),     device='cuda', dtype=torch.float16, )
         ####    end CLIP-L
 
         #merge
@@ -492,7 +524,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             )
             
         SD3Storage.model = model
-#        if SD3Storage.noUnload:    #for low VRAM only
+#        if SD3Storage.noUnload:    #for very low VRAM only
 #            SD3Storage.pipe.enable_sequential_cpu_offload()
         SD3Storage.pipe.enable_model_cpu_offload()
 
@@ -619,17 +651,20 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         useControlNet += f" strength: {controlNetStrength}; step range: {controlNetStart}-{controlNetEnd}"
 
     result = []
-    for latentImage in output:
+    total = len(output)
+    for i in range (total):
+        print (f'SD3: VAE: {i+1} of {total}', end='\r', flush=True)
         info=create_infotext(
             model, combined_positive, combined_negative, 
             guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, num_steps, 
-            fixed_seed, 
+            fixed_seed + i, 
             width, height,
             loraSettings,
             useControlNet)      #   doing this for every image when only change is fixed_seed
 
         #   manually handling the VAE prevents hitting shared memory on 8GB
-        latent = (latentImage / SD3Storage.pipe.vae.config.scaling_factor) + SD3Storage.pipe.vae.config.shift_factor
+        latent = (output[i:i+1]) / SD3Storage.pipe.vae.config.scaling_factor
+        latent = latent + SD3Storage.pipe.vae.config.shift_factor
         image = SD3Storage.pipe.vae.decode(latent, return_dict=False)[0]
         image = SD3Storage.pipe.image_processor.postprocess(image, output_type='pil')[0]
 
@@ -639,12 +674,12 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             image,
             opts.outdir_samples or opts.outdir_txt2img_samples,
             "",
-            fixed_seed,
+            fixed_seed + i,
             combined_positive,
             opts.samples_format,
             info
         )
-        fixed_seed += 1
+    print ('SD3: VAE: done  ')
 
     if not SD3Storage.noUnload:
         SD3Storage.pipe = None
@@ -654,7 +689,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     torch.cuda.empty_cache()
 
     SD3Storage.locked = False
-    return gradio.Button.update(value='Generate', variant='primary', interactive=True), result
+    return gradio.Button.update(value='Generate', variant='primary', interactive=True), gradio.Button.update(interactive=True), result
 
 
 def on_ui_tabs():
@@ -840,7 +875,7 @@ def on_ui_tabs():
             print("SuperPrompt-v1 model loaded successfully.")
             if torch.cuda.is_available():
                 superprompt.to('cuda')
-
+ 
         torch.manual_seed(get_fixed_seed(seed))
         device = superprompt.device
         systemprompt1 = "Expand the following prompt to add more detail: "
@@ -880,7 +915,7 @@ def on_ui_tabs():
         SD3Storage.lora = lora
         SD3Storage.lora_scale = scale# if lora != "(None)" else 1.0
         SD3Storage.locked = True
-        return gradio.Button.update(value='...', variant='secondary', interactive=False)
+        return gradio.Button.update(value='...', variant='secondary', interactive=False), gradio.Button.update(interactive=False)
 
 
     def parsePrompt (positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns, loraName, loraScale):
@@ -1173,8 +1208,8 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])
-        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button])
+        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery])
+        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button, SP])
 
     return [(sd3_block, "StableDiffusion3", "sd3")]
 

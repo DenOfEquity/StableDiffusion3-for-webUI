@@ -5,11 +5,11 @@ I don't think there is anything Forge specific here. But A1111 has native suppor
 ---
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
-### SD3 (with controlNet) needs *diffusers 0.29.1* ###
+### SD3 (with controlNet) needs *diffusers 0.29.2* ###
 
 Easiest way to ensure necessary diffusers release is installed is to edit **requirements_versions.txt** in the webUI directory.
 ```
-diffusers>=0.29.1
+diffusers>=0.29.2
 transformers>=4.40
 tokenizers>=0.19
 huggingface-hub>=0.23.4

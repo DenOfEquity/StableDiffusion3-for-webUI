@@ -160,7 +160,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             prompt_2 = prompt_1
             prompt_3 = prompt_1
         elif c == 2:
-            if SD3Storage.T5 == True:
+            if SD3Storage.useT5 == True:
                 prompt_2 = prompt_1
                 prompt_3 = split_prompt[1].strip()
             else:

@@ -173,19 +173,20 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
 
     positive_prompt_1, positive_prompt_2, positive_prompt_3 = promptSplit (positive_prompt)
     negative_prompt_1, negative_prompt_2, negative_prompt_3 = promptSplit (negative_prompt)
-        
-    for s in style:
-        k = 0;
-        while styles.styles_list[k][0] != s:
-            k += 1
-        if "{prompt}" in styles.styles_list[k][1]:
-            positive_prompt_1 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_1)
-            positive_prompt_2 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_2)
-            positive_prompt_3 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_3)
-        else:
-            positive_prompt_1 += styles.styles_list[k][1]
-            positive_prompt_2 += styles.styles_list[k][1]
-            positive_prompt_3 += styles.styles_list[k][1]
+
+    if style != None:
+        for s in style:
+            k = 0;
+            while styles.styles_list[k][0] != s:
+                k += 1
+            if "{prompt}" in styles.styles_list[k][1]:
+                positive_prompt_1 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_1)
+                positive_prompt_2 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_2)
+                positive_prompt_3 = styles.styles_list[k][1].replace("{prompt}", positive_prompt_3)
+            else:
+                positive_prompt_1 += styles.styles_list[k][1]
+                positive_prompt_2 += styles.styles_list[k][1]
+                positive_prompt_3 += styles.styles_list[k][1]
             
     combined_positive = positive_prompt_1 + " | \n" + positive_prompt_2 + " | \n" + positive_prompt_3
     combined_negative = negative_prompt_1 + " | \n" + negative_prompt_2 + " | \n" + negative_prompt_3
@@ -294,7 +295,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             )
 
             input_ids = tokenizer(
-                [positive_prompt_1, negative_prompt_1],          padding=True, max_length=77, truncation=True,
+                [positive_prompt_1, negative_prompt_1],          padding='max_length', max_length=77, truncation=True,
                 return_tensors="pt",
             ).input_ids
 
@@ -361,7 +362,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 use_auth_token=access_token,
             )
             input_ids = tokenizer(
-                [positive_prompt_2, negative_prompt_2],          padding=True, max_length=77, truncation=True,
+                [positive_prompt_2, negative_prompt_2],          padding='max_length', max_length=77, truncation=True,
                 return_tensors="pt",
             ).input_ids
 

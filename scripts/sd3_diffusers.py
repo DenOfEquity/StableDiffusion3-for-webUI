@@ -6,8 +6,15 @@
 #   high 16         - everything fully to GPU while running, CLIPs + transformer to cpu after use (T5 stay GPU)
 #   very high 24+   - everything to GPU, noUnload (lock setting?)
 
+
+from diffusers.utils import check_min_version
+check_min_version("0.30.0")
+
+
 class SD3Storage:
     ModuleReload = False
+    usingGradio4 = False
+    doneAccessTokenWarning = False
     lastSeed = -1
     galleryIndex = 0
     combined_positive = None
@@ -40,13 +47,15 @@ class SD3Storage:
 
 import gc
 import gradio
+if int(gradio.__version__[0]) == 4:
+    SD3Storage.usingGradio4 = True
 import math
 import numpy
 import os
 import torch
 import torchvision.transforms.functional as TF
 try:
-    import reload
+    from importlib import reload
     SD3Storage.ModuleReload = True
 except:
     SD3Storage.ModuleReload = False
@@ -63,9 +72,10 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderMo
 from diffusers import FlowMatchEulerDiscreteScheduler, SD3Transformer2DModel
 from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 from diffusers.utils.torch_utils import randn_tensor
+from diffusers.utils import logging
 
 ##  for Florence-2, including workaround for unnecessary flash_attn requirement
-from unittest.mock import 
+from unittest.mock import patch
 from transformers.dynamic_module_utils import get_imports
 from transformers import AutoProcessor, AutoModelForCausalLM 
 
@@ -73,16 +83,16 @@ from transformers import AutoProcessor, AutoModelForCausalLM
 import customStylesListSD3 as styles
 import scripts.SD3_pipeline as pipeline
 
-
 # modules/processing.py
-def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, steps, seed, width, height, loraSettings, controlNetSettings):
+def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, PAG_scale, PAG_adapt, shift, clipskip, steps, seed, width, height, loraSettings, controlNetSettings):
     generation_params = {
         "Size"          :   f"{width}x{height}",
         "Seed"          :   seed,
         "Steps"         :   steps,
-        "CFG"           :   f"{guidance_scale} ({guidance_rescale}) [{guidance_cutoff}]",
+        "CFG"           :   f"{guidance_scale} ({guidance_rescale})",
+        "PAG"           :   f"{PAG_scale} ({PAG_adapt})",
         "Shift"         :   f"{shift}",
-        "Clip skip"     :   f"{clipskip}",
+        "CLIP skip"     :   f"{clipskip}",
         "LoRA"          :   loraSettings,
         "controlNet"    :   controlNetSettings,
         "CLIP-L"        :   '✓' if SD3Storage.useCL else '✗',
@@ -99,14 +109,19 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
 
     return f"Model: StableDiffusion3m {model}\n{prompt_text}{generation_params_text}{noise_text}"
 
-def predict(model, positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, 
+def predict(model, positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, shift, clipskip, 
             num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCutOff, 
-            controlNet, controlNetImage, controlNetStrength, controlNetStart, controlNetEnd):
+            controlNet, controlNetImage, controlNetStrength, controlNetStart, controlNetEnd, PAG_scale, PAG_adapt):
+
+    logging.set_verbosity(logging.ERROR)        #   diffusers and transformers both enjoy spamming the console with useless info
+
     try:
         with open('huggingface_access_token.txt', 'r') as file:
             access_token = file.read().strip()
     except:
-        print ("SD3: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download models. Local cache will work.")
+        if SD3Storage.doneAccessTokenWarning == False:
+            print ("SD3: couldn't load 'huggingface_access_token.txt' from the webui directory. Will not be able to download models. Local cache will work.")
+            SD3Storage.doneAccessTokenWarning = True
         access_token = 0
 
     torch.set_grad_enabled(False)
@@ -114,14 +129,11 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     localFilesOnly = SD3Storage.LFO
     
     # do I care about catching this?
-#    if SD3Storage.CL == False and SD3Storage.CG == False and SD3Storage.T5 == False:
-        
-    if controlNet != 0 and controlNetImage != None and controlNetStrength > 0.0:
-        controlNetImage = controlNetImage.resize((width, height))
-        useControlNet = ['InstantX/SD3-Controlnet-Canny', 'InstantX/SD3-Controlnet-Pose', 'InstantX/SD3-Controlnet-Tile'][controlNet-1]
-    else:
-        controlNetStrength = 0.0
-        useControlNet = None
+#    if SD3Storage.useCL == False and SD3Storage.useCG == False and SD3Storage.useT5 == False:
+
+    if PAG_scale > 0.0:
+        if guidance_rescale < 1.0:
+            guidance_rescale = 1.0
 
     ####    check img2img
     if i2iSource == None:
@@ -131,25 +143,61 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         maskType = 0
     if SD3Storage.i2iAllSteps == True:
         num_steps = int(num_steps / i2iDenoise)
-        
+
     match maskType:
         case 0:     #   'none'
-            maskSource = None
-            maskBlur = 0
+            if controlNet == 4:
+                maskSource = maskSource['background'] if SD3Storage.usingGradio4 else maskSource['image']
+            else:
+                maskSource = None
+                maskBlur = 0
             maskCutOff = 1.0
         case 1:     #   'image'
-            maskSource = maskSource['image']
+            maskSource = maskSource['background'] if SD3Storage.usingGradio4 else maskSource['image']
         case 2:     #   'drawn'
-            maskSource = maskSource['mask']
+            maskSource = maskSource['layers'][0] if SD3Storage.usingGradio4 else maskSource['mask']
+        case 3:     #   'composite'
+            maskSource = maskSource['composite'] if SD3Storage.usingGradio4 else maskSource['image']
         case _:
             maskSource = None
             maskBlur = 0
             maskCutOff = 1.0
 
-    if maskBlur > 0:
-        maskSource = TF.gaussian_blur(maskSource, 1+2*maskBlur)
-        
+    if i2iSource:
+        i2iSource = i2iSource.resize((width, height))
+    if maskSource:
+        maskSource = maskSource.resize((width, height))
+        if maskBlur > 0:
+            maskSource = TF.gaussian_blur(maskSource, 1+2*maskBlur)
     ####    end check img2img
+    
+    ####    controlnet
+    useControlNet = None
+    match controlNet:
+        case 1:
+            if controlNetImage and controlNetStrength > 0.0:
+                useControlNet = 'InstantX/SD3-Controlnet-Canny'
+        case 2:
+            if controlNetImage and controlNetStrength > 0.0:
+                useControlNet = 'InstantX/SD3-Controlnet-Pose'
+        case 3:
+            if controlNetImage and controlNetStrength > 0.0:
+                useControlNet = 'InstantX/SD3-Controlnet-Tile'
+        case 4:
+            if i2iSource and maskSource and controlNetStrength > 0.0:
+                controlNetImage = i2iSource
+                i2iSource = None
+                useControlNet = 'alimama-creative/SD3-Controlnet-Inpainting'
+        case _:
+            controlNetStrength = 0.0
+    if useControlNet:
+        controlNetImage = controlNetImage.resize((width, height))
+    ####    end controlnet
+
+    if model == '(base)':
+        customModel = None
+    else:
+        customModel = './/models//diffusers//SD3Custom//' + model + '.safetensors'
 
     #   triple prompt, automatic support, no longer needs button to enable
     def promptSplit (prompt):
@@ -174,7 +222,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     positive_prompt_1, positive_prompt_2, positive_prompt_3 = promptSplit (positive_prompt)
     negative_prompt_1, negative_prompt_2, negative_prompt_3 = promptSplit (negative_prompt)
 
-    if style != None:
+    if style:
         for s in style:
             k = 0;
             while styles.styles_list[k][0] != s:
@@ -212,7 +260,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         ####    start T5 text encoder
         if SD3Storage.useT5 == True:
             tokenizer = T5TokenizerFast.from_pretrained(
-                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                source, local_files_only=localFilesOnly,
                 subfolder='tokenizer_3',
                 torch_dtype=torch.float16,
                 max_length=512,
@@ -247,14 +295,37 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                     device_map = 'auto'
 
                 print ("SD3: loading T5 ...", end="\r", flush=True)
-                SD3Storage.teT5  = T5EncoderModel.from_pretrained(
-                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
-                    subfolder='text_encoder_3',
-                    torch_dtype=torch.float16,
-                    device_map=device_map,
-                    use_auth_token=access_token,
-                )
-            #   if model loaded, then switch off noUnload, loaded model still used (could alter device_map?: model.hf_device_map)
+
+                if model != SD3Storage.lastModel:
+                    if model == '(base)':
+                        SD3Storage.teT5 = None
+                    else:
+                        try:    #   maybe custom model has trained T5 - idiocy IMO - not sure if correct way to load
+                            SD3Storage.teT5 = T5EncoderModel.from_single_file(
+                                customModel, local_files_only=localFilesOnly,
+                                subfolder='text_encoder_3',
+                                torch_dtype=torch.float16,
+                                device_map=device_map,
+                                use_auth_token=access_token,
+                            )
+                        except:
+                            SD3Storage.teT5 = None
+                if SD3Storage.teT5 == None:             #   model not loaded, use base
+                    try:    #   some potential to error here, if available VRAM changes while loading device_map could be wrong
+                        SD3Storage.teT5  = T5EncoderModel.from_pretrained(
+                            source, local_files_only=localFilesOnly,
+                            subfolder='text_encoder_3',
+                            torch_dtype=torch.float16,
+                            device_map=device_map,
+                            use_auth_token=access_token,
+                        )
+                    except:
+                        print ("SD3: loading T5 failed, likely low VRAM at moment of load. Try again, and/or: close other programs, reload/restart webUI, use 'keep models loaded' option.")
+                        gradio.Info('Unable to load T5. See console.')
+                        SD3Storage.locked = False
+                        return gradio.Button.update(value='Generate', variant='primary', interactive=True), gradio.Button.update(interactive=True), result
+
+            #   if model loaded, then user switches off noUnload, loaded model still used on next run (could alter device_map?: model.hf_device_map)
             #   not a major concern anyway
 
             print ("SD3: encoding prompt (T5) ...", end="\r", flush=True)
@@ -267,14 +338,6 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 
             del input_ids, embeds_3
             
-            # positive_embeds_3 = SD3Storage.teT5(positive_input_ids)[0]
-
-            # if SD3Storage.ZN == True:
-              # negative_embeds_3 = torch.zeros((1, 512, 4096),    device='cuda', dtype=torch.float16, )
-                # negative_embeds_3 = torch.zeros_like(positive_embeds_3)
-            # else:
-                # negative_embeds_3 = SD3Storage.teT5(negative_input_ids)[0]
-
             if SD3Storage.noUnload == False:
                 SD3Storage.teT5 = None
             print ("SD3: encoding prompt (T5) ... done")
@@ -288,7 +351,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         ####    start CLIP-G
         if SD3Storage.useCG == True:
             tokenizer = CLIPTokenizer.from_pretrained(
-                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                source, local_files_only=localFilesOnly,
                 subfolder='tokenizer',
                 torch_dtype=torch.float16,
                 use_auth_token=access_token,
@@ -311,7 +374,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 else:
                     try:    #   maybe custom model has trained CLIPs - not sure if correct way to load
                         SD3Storage.teCG = CLIPTextModelWithProjection.from_single_file(
-                            model, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                            customModel, local_files_only=localFilesOnly,
                             subfolder='text_encoder',
                             torch_dtype=torch.float16,
                             use_auth_token=access_token,
@@ -320,7 +383,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                         SD3Storage.teCG = None
             if SD3Storage.teCG == None:             #   model not loaded, use base
                 SD3Storage.teCG = CLIPTextModelWithProjection.from_pretrained(
-                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    source, local_files_only=localFilesOnly,
                     subfolder='text_encoder',
                     low_cpu_mem_usage=True,
                     torch_dtype=torch.float16,
@@ -356,7 +419,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         ####    start CLIP-L
         if SD3Storage.useCL == True:
             tokenizer = CLIPTokenizer.from_pretrained(
-                source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                source, local_files_only=localFilesOnly,
                 subfolder='tokenizer_2',
                 torch_dtype=torch.float16,
                 use_auth_token=access_token,
@@ -378,7 +441,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 else:
                     try:    #   maybe custom model has trained CLIPs - not sure if correct way to load
                         SD3Storage.teCL = CLIPTextModelWithProjection.from_single_file(
-                            model, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                            customModel, local_files_only=localFilesOnly,
                             subfolder='text_encoder_2',
                             torch_dtype=torch.float16,
                             use_auth_token=access_token,
@@ -387,7 +450,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                         SD3Storage.teCL = None
             if SD3Storage.teCL == None:             #   model not loaded, use base
                 SD3Storage.teCL = CLIPTextModelWithProjection.from_pretrained(
-                    source, local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                    source, local_files_only=localFilesOnly,
                     subfolder='text_encoder_2',
                     low_cpu_mem_usage=True,
                     torch_dtype=torch.float16,
@@ -453,14 +516,23 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     ####    end useCachedEmbeds
 
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(source,
-                                                                subfolder='scheduler', local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                                                                subfolder='scheduler', local_files_only=localFilesOnly,
                                                                 shift=shift,
                                                                 token=access_token,
                                                                 )
     if useControlNet:
         if useControlNet != SD3Storage.lastControlNet:
-            controlnet=SD3ControlNetModel.from_pretrained(
-                useControlNet, cache_dir=".//models//diffusers//", torch_dtype=torch.float16)
+            if controlNet == 4:
+                controlnet=SD3ControlNetModel.from_pretrained(
+                    useControlNet, torch_dtype=torch.float16,
+                    extra_conditioning_channels=1,
+#                    low_cpu_mem_usage=False,
+#                    ignore_mismatched_sizes=True
+                )
+            else:
+                controlnet=SD3ControlNetModel.from_pretrained(
+                    useControlNet, torch_dtype=torch.float16,
+                )
     else:
         controlnet = None
 
@@ -468,7 +540,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         if model == '(base)':
             SD3Storage.pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
                 source,
-                local_files_only=localFilesOnly, cache_dir=".//models//diffusers//",
+                local_files_only=localFilesOnly,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,                
                 use_safetensors=True,
@@ -477,10 +549,9 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 controlnet=controlnet
             )
         else:
-            customModel = './/models//diffusers//SD3Custom//' + model + '.safetensors'
             SD3Storage.pipe = pipeline.SD3Pipeline_DoE_combined.from_pretrained(
                 source,
-                local_files_only=True, cache_dir=".//models//diffusers//",
+                local_files_only=True,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,                
                 use_safetensors=True,
@@ -490,23 +561,25 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 controlnet=controlnet
             )
         SD3Storage.lastModel = model
-#        if SD3Storage.noUnload:        #   use for low VRAM only
+        SD3Storage.lastControlNet = useControlNet
+
+        SD3Storage.pipe.enable_sequential_cpu_offload()
+
+#        if controlNet == 4: #SD3Storage.noUnload:    #for very low VRAM only, not needed for 8GB
 #            SD3Storage.pipe.enable_sequential_cpu_offload()
 #        else:
-#            SD3Storage.pipe.to('cuda')
+#            SD3Storage.pipe.enable_model_cpu_offload()
 
-        SD3Storage.pipe.enable_model_cpu_offload()
         SD3Storage.pipe.vae.to(memory_format=torch.channels_last)
-    else:
+    else:       #   do have pipe
         SD3Storage.pipe.scheduler = scheduler
-        if SD3Storage.noUnload:
-            if useControlNet != SD3Storage.lastControlNet:
-                SD3Storage.pipe.controlnet = controlnet
-                SD3Storage.lastControlNet = useControlNet
+        SD3Storage.pipe.controlnet = controlnet
+        SD3Storage.lastControlNet = useControlNet
 
     del scheduler, controlnet
 
     if model != SD3Storage.lastModel:
+        print ("SD3: loading transformer ...", end="\r", flush=True)
         del SD3Storage.pipe.transformer
         if model == '(base)':
             SD3Storage.pipe.transformer=SD3Transformer2DModel.from_pretrained(
@@ -516,7 +589,6 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 torch_dtype=torch.float16
             )
         else:
-            customModel = './/models//diffusers//SD3Custom//' + model + '.safetensors'
             SD3Storage.pipe.transformer=SD3Transformer2DModel.from_single_file(
                 customModel,
                 local_files_only=True,
@@ -524,12 +596,19 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
                 torch_dtype=torch.float16
             )
             
-        SD3Storage.model = model
-#        if SD3Storage.noUnload:    #for very low VRAM only
+        SD3Storage.lastModel = model
+#        if controlNet == 4: #SD3Storage.noUnload:    #for very low VRAM only, not needed for 8GB
 #            SD3Storage.pipe.enable_sequential_cpu_offload()
-        SD3Storage.pipe.enable_model_cpu_offload()
+#        else:
+#            SD3Storage.pipe.enable_model_cpu_offload()
+
+    SD3Storage.pipe.enable_model_cpu_offload()
 
     SD3Storage.pipe.transformer.to(memory_format=torch.channels_last)
+
+    #   same for VAE? currently not cleared (only ~170MB in fp16)
+#    if SD3Storage.pipe.vae == None:
+#        
 
     shape = (
         num_images,
@@ -603,7 +682,6 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             num_inference_steps             = num_steps,
             guidance_scale                  = guidance_scale,
             guidance_rescale                = guidance_rescale,
-            guidance_cutoff                 = guidance_cutoff,
             prompt_embeds                   = SD3Storage.positive_embeds.to('cuda'),
             negative_prompt_embeds          = SD3Storage.negative_embeds.to('cuda'),
             pooled_prompt_embeds            = SD3Storage.positive_pooled.to('cuda'),
@@ -621,10 +699,13 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             controlnet_conditioning_scale   = controlNetStrength,  
             control_guidance_start          = controlNetStart,
             control_guidance_end            = controlNetEnd,
-            
+
+            pag_scale                       = PAG_scale,
+            pag_adaptive_scale              = PAG_adapt,
+
             joint_attention_kwargs          = {"scale": SD3Storage.lora_scale }
         )
-        del controlNetImage, i2iSource
+        del controlNetImage, i2iSource, maskSource
 
     del generator, latents
 
@@ -636,7 +717,9 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
 #        SD3Storage.pipe.controlnet.to('cpu')
     else:
         SD3Storage.pipe.transformer = None
+        SD3Storage.lastModel = None
         SD3Storage.pipe.controlnet = None
+        SD3Storage.lastControlNet = None
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -657,7 +740,9 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
         print (f'SD3: VAE: {i+1} of {total}', end='\r', flush=True)
         info=create_infotext(
             model, combined_positive, combined_negative, 
-            guidance_scale, guidance_rescale, guidance_cutoff, shift, clipskip, num_steps, 
+            guidance_scale, guidance_rescale,
+            PAG_scale, PAG_adapt, 
+            shift, clipskip, num_steps, 
             fixed_seed + i, 
             width, height,
             loraSettings,
@@ -683,7 +768,8 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     print ('SD3: VAE: done  ')
 
     if not SD3Storage.noUnload:
-        SD3Storage.pipe = None
+        SD3Storage.pipe.scheduler = None    #   always loading scheduler, to set shift
+        #   not deleting pipe, just contents of pipe: save update check
     
     del output
     gc.collect()
@@ -737,9 +823,6 @@ def on_ui_tabs():
     def reuseLastSeed ():
         return SD3Storage.lastSeed + SD3Storage.galleryIndex
         
-    def randomSeed ():
-        return -1
-
     def i2iSetDimensions (image, w, h):
         if image is not None:
             w = 32 * (image.size[0] // 32)
@@ -748,8 +831,12 @@ def on_ui_tabs():
 
     def i2iImageFromGallery (gallery):
         try:
-            newImage = gallery[SD3Storage.galleryIndex][0]['name'].split('?')
-            return newImage[0]
+            if SD3Storage.usingGradio4:
+                newImage = gallery[SD3Storage.galleryIndex][0]
+                return newImage
+            else:
+                newImage = gallery[SD3Storage.galleryIndex][0]['name'].rsplit('?', 1)[0]
+                return newImage
         except:
             return None
 
@@ -861,13 +948,11 @@ def on_ui_tabs():
         if tokenizer is None:
             tokenizer = T5TokenizerFast.from_pretrained(
                 'roborovski/superprompt-v1',
-                cache_dir='.//models//diffusers//',
             )
             shared.SuperPrompt_tokenizer = tokenizer
         if superprompt is None:
             superprompt = T5ForConditionalGeneration.from_pretrained(
                 'roborovski/superprompt-v1',
-                cache_dir='.//models//diffusers//',
                 device_map='auto',
                 torch_dtype=torch.float16
             )
@@ -918,7 +1003,7 @@ def on_ui_tabs():
         return gradio.Button.update(value='...', variant='secondary', interactive=False), gradio.Button.update(interactive=False)
 
 
-    def parsePrompt (positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns, loraName, loraScale):
+    def parsePrompt (positive, negative, width, height, seed, steps, CFG, CFGrescale, PAG_scale, PAG_adapt, shift, nr, ng, nb, ns, loraName, loraScale):
         p = positive.split('\n')
         lineCount = len(p)
 
@@ -981,8 +1066,8 @@ def on_ui_tabs():
                     match pairs[0]:
                         case "Size:":
                             size = pairs[1].split('x')
-                            width = int(size[0])
-                            height = int(size[1])
+                            width = 32 * ((int(size[0]) + 16) // 32)
+                            height = 32 * ((int(size[1]) + 16) // 32)
                         case "Seed:":
                             seed = int(pairs[1])
                         case "Steps(Prior/Decoder):":
@@ -995,22 +1080,25 @@ def on_ui_tabs():
                                 CFG = float(pairs[2])
                         case "CFG:":
                             CFG = float(pairs[1])
-                            if len(pairs) == 4:
+                            if len(pairs) >= 3:
                                 CFGrescale = float(pairs[2].strip('\(\)'))
-                                CFGcutoff = float(pairs[3].strip('\[\]'))
+                        case "PAG:":
+                            if len(pairs) == 3:
+                                PAG_scale = float(pairs[1])
+                                PAG_adapt = float(pairs[2].strip('\(\)'))
                         case "Shift:":
                             shift = float(pairs[1])
                         case "width:":
-                            width = float(pairs[1])
+                            width = 32 * ((int(pairs[1]) + 16) // 32)
                         case "height:":
-                            height = float(pairs[1])
+                            height = 32 * ((int(pairs[1]) + 16) // 32)
                         case "LoRA:":
                             if len(pairs) == 3:
                                 loraName = pairs[1]
                                 loraScale = float(pairs[2].strip('\(\)'))
                             
                         #clipskip?
-        return positive, negative, width, height, seed, steps, CFG, CFGrescale, CFGcutoff, shift, nr, ng, nb, ns, loraName, loraScale
+        return positive, negative, width, height, seed, steps, CFG, CFGrescale, PAG_scale, PAG_adapt, shift, nr, ng, nb, ns, loraName, loraScale
 
     def style2prompt (prompt, style):
         splitPrompt = prompt.split('|')
@@ -1078,7 +1166,7 @@ def on_ui_tabs():
                     clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
 
                 with gradio.Row():
-                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here ...', default='', lines=1.01)
+                    positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here ...', lines=1.01)
                     parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
                     SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
                 with gradio.Row():
@@ -1100,9 +1188,11 @@ def on_ui_tabs():
 
                 with gradio.Row():
                     guidance_scale = gradio.Slider(label='CFG', minimum=1, maximum=16, step=0.1, value=5, scale=1)
-                    CFGrescale = gradio.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, precision=0.01, scale=1)
-                    CFGcutoff = gradio.Slider(label='CFG cutoff step', minimum=0.00, maximum=1.0, step=0.01, value=1.0, precision=0.01, scale=1)
+                    CFGrescale = gradio.Slider(label='rescale CFG', minimum=0.00, maximum=1.0, step=0.01, value=0.0, scale=1)
                     shift = gradio.Slider(label='Shift', minimum=1.0, maximum=8.0, step=0.1, value=3.0, scale=1)
+                with gradio.Row():
+                    PAG_scale = gradio.Slider(label='Perturbed-Attention Guidance scale', minimum=0, maximum=8, step=0.1, value=3.0, scale=1, visible=True)
+                    PAG_adapt = gradio.Slider(label='PAG adaptive scale', minimum=0.00, maximum=0.1, step=0.001, value=0.0, scale=1)
                 with gradio.Row(equal_height=True):
                     steps = gradio.Slider(label='Steps', minimum=1, maximum=80, step=1, value=20, scale=2)
                     sampling_seed = gradio.Number(label='Seed', value=-1, precision=0, scale=0)
@@ -1127,7 +1217,14 @@ def on_ui_tabs():
                     with gradio.Row():
                         CNSource = gradio.Image(label='control image', sources=['upload'], type='pil', interactive=True, show_download_button=False)
                         with gradio.Column():
-                            CNMethod = gradio.Dropdown(['(None)', 'canny', 'pose', 'tile'], label='method', value='(None)', type='index', multiselect=False, scale=1)
+                            CNMethod = gradio.Dropdown(['(None)',
+                                                        'canny',
+                                                        'pose',
+                                                        'tile',
+#                                                        'inpaint (uses image to image source and mask)',
+                                                        ], 
+                                                        label='method', value='(None)', type='index', multiselect=False, scale=1)
+                                                        #, 'inpaint (uses image to image source and mask)'
                             CNStrength = gradio.Slider(label='Strength', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
                             CNStart = gradio.Slider(label='Start step', minimum=0.00, maximum=1.0, step=0.01, value=0.0)
                             CNEnd = gradio.Slider(label='End step', minimum=0.00, maximum=1.0, step=0.01, value=0.8)
@@ -1135,7 +1232,10 @@ def on_ui_tabs():
                 with gradio.Accordion(label='image to image', open=False):
                     with gradio.Row():
                         i2iSource = gradio.Image(label='image to image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        maskSource = gradio.Image(label='source mask', sources=['upload'], type='pil', interactive=True, show_download_button=False, tool='sketch', image_mode='RGB', brush_color='#F0F0F0')#opts.img2img_inpaint_mask_brush_color)
+                        if SD3Storage.usingGradio4:
+                            maskSource = gradio.ImageMask(label='mask source', sources=['upload'], type='pil', interactive=True, show_download_button=False, layers=False, brush=gradio.Brush(colors=["#F0F0F0"], default_color="#F0F0F0", color_mode='fixed'))
+                        else:
+                            maskSource = gradio.Image(label='mask source', sources=['upload'], type='pil', interactive=True, show_download_button=False, tool='sketch', image_mode='RGB', brush_color='#F0F0F0')
                     with gradio.Row():
                         with gradio.Column():
                             with gradio.Row():
@@ -1149,21 +1249,21 @@ def on_ui_tabs():
                                 toPrompt = ToolButton(value='P', variant='secondary')
 
                         with gradio.Column():
-                            maskType = gradio.Dropdown(['none', 'image', 'drawn'], value='none', label='Mask', type='index')
-                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
+                            maskType = gradio.Dropdown(['none', 'image', 'drawn', 'composite'], value='none', label='Mask', type='index')
                             maskBlur = gradio.Slider(label='Blur mask radius', minimum=0, maximum=25, step=1, value=0)
+                            maskCut = gradio.Slider(label='Ignore Mask after step', minimum=0.00, maximum=1.0, step=0.01, value=1.0)
                             maskCopy = gradio.Button(value='use i2i source as template')
 
                 with gradio.Row():
                     noUnload = gradio.Button(value='keep models loaded', variant='primary' if SD3Storage.noUnload else 'secondary', tooltip='noUnload', scale=1)
                     unloadModels = gradio.Button(value='unload models', tooltip='force unload of models', scale=1)
 
-                ctrls = [model, positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, CFGcutoff, shift, clipskip, steps, sampling_seed, batch_size, style, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCut, CNMethod, CNSource, CNStrength, CNStart, CNEnd]
-                parseable = [positive_prompt, negative_prompt, width, height, sampling_seed, steps, guidance_scale, CFGrescale, CFGcutoff, shift, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale]
+                ctrls = [model, positive_prompt, negative_prompt, width, height, guidance_scale, CFGrescale, shift, clipskip, steps, sampling_seed, batch_size, style, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCut, CNMethod, CNSource, CNStrength, CNStart, CNEnd, PAG_scale, PAG_adapt]
+                parseable = [positive_prompt, negative_prompt, width, height, sampling_seed, steps, guidance_scale, CFGrescale, PAG_scale, PAG_adapt, shift, initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale]
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gradio.Gallery(label='Output', height="80vh",
+                output_gallery = gradio.Gallery(label='Output', height="80vh", type='pil', interactive=False, 
                                             show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
 #   gallery movement buttons don't work, others do
 #   caption not displaying linebreaks, alt text does
@@ -1196,8 +1296,8 @@ def on_ui_tabs():
         ZN.click(toggleZN, inputs=[], outputs=ZN)
         AS.click(toggleAS, inputs=[], outputs=AS)
 #        LFO.click(toggleLFO, inputs=[], outputs=LFO)
-        swapper.click(fn=None, _js="function(){switchWidthHeight('StableDiffusion3')}", inputs=None, outputs=None, show_progress=False)
-        random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+        swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
+        random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         randNeg.click(randomString, inputs=[], outputs=[negative_prompt])
 
@@ -1208,10 +1308,10 @@ def on_ui_tabs():
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery])
+        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button)
         generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button, SP])
 
-    return [(sd3_block, "StableDiffusion3", "sd3")]
+    return [(sd3_block, "StableDiffusion3", "sd3_DoE")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
 

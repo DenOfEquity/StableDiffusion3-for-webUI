@@ -16,7 +16,6 @@ class SD3Storage:
     usingGradio4 = False
     doneAccessTokenWarning = False
     lastSeed = -1
-    galleryIndex = 0
     combined_positive = None
     combined_negative = None
     clipskip = 0
@@ -86,9 +85,9 @@ import scripts.SD3_pipeline as pipeline
 # modules/processing.py
 def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, guidance_rescale, PAG_scale, PAG_adapt, shift, clipskip, steps, seed, width, height, loraSettings, controlNetSettings):
     generation_params = {
+        "Steps"         :   steps,
         "Size"          :   f"{width}x{height}",
         "Seed"          :   seed,
-        "Steps"         :   steps,
         "CFG"           :   f"{guidance_scale} ({guidance_rescale})",
         "PAG"           :   f"{PAG_scale} ({PAG_adapt})",
         "Shift"         :   f"{shift}",
@@ -102,12 +101,12 @@ def create_infotext(model, positive_prompt, negative_prompt, guidance_scale, gui
     }
 #add loras list and scales
 
-    prompt_text = f"Prompt: {positive_prompt}\n"
-    prompt_text += (f"Negative: {negative_prompt}\n")
+    prompt_text = f"{positive_prompt}\n"
+    prompt_text += (f"Negative prompt: {negative_prompt}\n")
     generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
-    noise_text = f"\nInitial noise: {SD3Storage.noiseRGBA}" if SD3Storage.noiseRGBA[3] != 0.0 else ""
+    noise_text = f", Initial noise: {SD3Storage.noiseRGBA}" if SD3Storage.noiseRGBA[3] != 0.0 else ""
 
-    return f"Model: StableDiffusion3m {model}\n{prompt_text}{generation_params_text}{noise_text}"
+    return f"{prompt_text}{generation_params_text}{noise_text}, Model (SD3m): {model}"
 
 def predict(model, positive_prompt, negative_prompt, width, height, guidance_scale, guidance_rescale, shift, clipskip, 
             num_steps, sampling_seed, num_images, style, i2iSource, i2iDenoise, maskType, maskSource, maskBlur, maskCutOff, 
@@ -817,11 +816,14 @@ def on_ui_tabs():
         models = buildModelList ()
         return gradio.Dropdown.update(choices=models)
    
-    def getGalleryIndex (evt: gradio.SelectData):
-        SD3Storage.galleryIndex = evt.index
+    def getGalleryIndex (index):
+        return index
 
-    def reuseLastSeed ():
-        return SD3Storage.lastSeed + SD3Storage.galleryIndex
+    def getGalleryText (gallery, index):
+        return gallery[index][1]
+
+    def reuseLastSeed (index):
+        return SD3Storage.lastSeed + index
         
     def i2iSetDimensions (image, w, h):
         if image is not None:
@@ -829,13 +831,13 @@ def on_ui_tabs():
             h = 32 * (image.size[1] // 32)
         return [w, h]
 
-    def i2iImageFromGallery (gallery):
+    def i2iImageFromGallery (gallery, index):
         try:
             if SD3Storage.usingGradio4:
-                newImage = gallery[SD3Storage.galleryIndex][0]
+                newImage = gallery[index][0]
                 return newImage
             else:
-                newImage = gallery[SD3Storage.galleryIndex][0]['name'].rsplit('?', 1)[0]
+                newImage = gallery[index][0]['name'].rsplit('?', 1)[0]
                 return newImage
         except:
             return None
@@ -1160,18 +1162,16 @@ def on_ui_tabs():
                     CL = ToolButton(value='CL', variant='primary',   tooltip='use CLIP-L text encoder')
                     CG = ToolButton(value='CG', variant='primary',   tooltip='use CLIP-G text encoder')
                     T5 = ToolButton(value='T5', variant='secondary', tooltip='use T5 text encoder')
-                    nouseC = ToolButton(value="️|", variant='tertiary', tooltip='', interactive=False)
-                    ZN = ToolButton(value='ZN', variant='secondary', tooltip='zero out negative embeds')
-                    nouseB = ToolButton(value="️|", variant='tertiary', tooltip='', interactive=False)
-                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
 
                 with gradio.Row():
                     positive_prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here ...', lines=1.01)
-                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
-                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
+                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=8, step=1, value=0, precision=0, scale=0)
                 with gradio.Row():
                     negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.01)
+                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
                     randNeg = ToolButton(value='rng', variant='secondary', tooltip='random negative')
+                    ZN = ToolButton(value='ZN', variant='secondary', tooltip='zero out negative embeds')
+                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='prompt enhancement')
 
                 with gradio.Row():
                     style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value=None, type='value', multiselect=True)
@@ -1180,9 +1180,9 @@ def on_ui_tabs():
 #make infotext from all settings, send to clipboard?
 
                 with gradio.Row():
-                    width = gradio.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_width')
+                    width = gradio.Slider(label='Width', minimum=512, maximum=2048, step=32, value=1024)
                     swapper = ToolButton(value='\U000021C4')
-                    height = gradio.Slider(label='Height', minimum=512, maximum=2048, step=32, value=1024, elem_id='StableDiffusion3_height')
+                    height = gradio.Slider(label='Height', minimum=512, maximum=2048, step=32, value=1024)
                     dims = gradio.Dropdown([f'{i} \u00D7 {j}' for i,j in resolutionList],
                                         label='Quickset', type='index', scale=0)
 
@@ -1263,10 +1263,12 @@ def on_ui_tabs():
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary', visible=True)
-                output_gallery = gradio.Gallery(label='Output', height="80vh", type='pil', interactive=False, 
+                output_gallery = gradio.Gallery(label='Output', height="80vh", type='pil', interactive=False, elem_id="SD3m_gallery",
                                             show_label=False, object_fit='contain', visible=True, columns=1, preview=True)
-#   gallery movement buttons don't work, others do
+
 #   caption not displaying linebreaks, alt text does
+                gallery_index = gradio.Number(value=0, visible=False)
+                infotext = gradio.Textbox(value="", visible=False)
 
                 with gradio.Row():
                     buttons = parameters_copypaste.create_buttons(["img2img", "inpaint", "extras"])
@@ -1274,7 +1276,7 @@ def on_ui_tabs():
                 for tabname, button in buttons.items():
                     parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
                         paste_button=button, tabname=tabname,
-                        source_text_component=positive_prompt,
+                        source_text_component=infotext,
                         source_image_component=output_gallery,
                     ))
         noUnload.click(toggleNU, inputs=[], outputs=noUnload)
@@ -1298,18 +1300,17 @@ def on_ui_tabs():
 #        LFO.click(toggleLFO, inputs=[], outputs=LFO)
         swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
         random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
-        reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+        reuseSeed.click(reuseLastSeed, inputs=gallery_index, outputs=sampling_seed, show_progress=False)
         randNeg.click(randomString, inputs=[], outputs=[negative_prompt])
 
         i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
-        i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
-        i2iCaption.click (fn=i2iMakeCaptions, inputs=[i2iSource, positive_prompt], outputs=[positive_prompt])#outputs=[positive_prompt]
+        i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery, gallery_index], outputs=[i2iSource])
+        i2iCaption.click (fn=i2iMakeCaptions, inputs=[i2iSource, positive_prompt], outputs=[positive_prompt])
         toPrompt.click(toggleC2P, inputs=[], outputs=[toPrompt])
 
-        output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
+        output_gallery.select(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button)
-        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button, SP])
+        generate_button.click(toggleGenerate, inputs=[initialNoiseR, initialNoiseG, initialNoiseB, initialNoiseA, lora, scale], outputs=[generate_button, SP]).then(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button).then(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
 
     return [(sd3_block, "StableDiffusion3", "sd3_DoE")]
 

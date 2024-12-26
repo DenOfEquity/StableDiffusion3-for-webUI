@@ -5,15 +5,17 @@ I don't think there is anything Forge specific here. But A1111 has native suppor
 ---
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
-### SD3 (with controlNet) needs *diffusers 0.29.2* ###
+### SD3 (with controlNet and PAG) needs *diffusers 0.30.0* ###
 
 Easiest way to ensure necessary diffusers release is installed is to edit **requirements_versions.txt** in the webUI directory.
 ```
-diffusers>=0.29.2
+diffusers>=0.30.0
 transformers>=4.40
 tokenizers>=0.19
 huggingface-hub>=0.23.4
 ```
+
+Forge2 already has newer versions for all but diffusers. Be aware that updates to Forge2 may overwrite the requirements file.
 
 >[!IMPORTANT]
 > **Also needs a huggingface access token:**
@@ -53,6 +55,14 @@ almost current UI screenshot
 ---
 <details>
 <summary>Change log</summary>
+
+#### 26/12/2024 ####
+* fixes for gallery, sending to i2i
+
+#### 24/08/2024 ####
+* added PAG support, removed CFG cutoff as they don't get along.
+* added rough support for inpaint controlnet, currently needs diffusers from source. Really needs >8GB VRAM, 10GB would likely be fine.
+* updates for gradio4
 
 #### 27/07/2024 ####
 * added drawing of masks for image to image. Load/copy the source image into the mask, to use as a template.

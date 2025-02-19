@@ -131,8 +131,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
 #    if SD3Storage.useCL == False and SD3Storage.useCG == False and SD3Storage.useT5 == False:
 
     if PAG_scale > 0.0:
-        if guidance_rescale < 1.0:
-            guidance_rescale = 1.0
+        guidance_rescale = 0.0
 
     ####    check img2img
     if i2iSource == None:
@@ -733,6 +732,8 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
     if useControlNet != None:
         useControlNet += f" strength: {controlNetStrength}; step range: {controlNetStart}-{controlNetEnd}"
 
+    original_samples_filename_pattern = opts.samples_filename_pattern
+    opts.samples_filename_pattern = "SD3m_[datetime]"
     result = []
     total = len(output)
     for i in range (total):
@@ -765,6 +766,7 @@ def predict(model, positive_prompt, negative_prompt, width, height, guidance_sca
             info
         )
     print ('SD3: VAE: done  ')
+    opts.samples_filename_pattern = original_samples_filename_pattern
 
     if not SD3Storage.noUnload:
         SD3Storage.pipe.scheduler = None    #   always loading scheduler, to set shift
@@ -1279,34 +1281,34 @@ def on_ui_tabs():
                         source_text_component=infotext,
                         source_image_component=output_gallery,
                     ))
-        noUnload.click(toggleNU, inputs=[], outputs=noUnload)
-        unloadModels.click(unloadM, inputs=[], outputs=[], show_progress=True)
+        noUnload.click(toggleNU, inputs=None, outputs=noUnload)
+        unloadModels.click(unloadM, inputs=None, outputs=None, show_progress=True)
                     
-        SP.click(toggleSP, inputs=[], outputs=SP)
+        SP.click(toggleSP, inputs=None, outputs=SP)
         SP.click(superPrompt, inputs=[positive_prompt, sampling_seed], outputs=[SP, positive_prompt])
         maskCopy.click(fn=maskFromImage, inputs=[i2iSource], outputs=[maskSource, maskType])
-        sharpNoise.click(toggleSharp, inputs=[], outputs=sharpNoise)
+        sharpNoise.click(toggleSharp, inputs=None, outputs=sharpNoise)
         strfh.click(refreshStyles, inputs=[style], outputs=[style])
         st2pr.click(style2prompt, inputs=[positive_prompt, style], outputs=[positive_prompt, style])
         parse.click(parsePrompt, inputs=parseable, outputs=parseable, show_progress=False)
         dims.input(updateWH, inputs=[dims, width, height], outputs=[dims, width, height], show_progress=False)
-        refreshM.click(refreshModels, inputs=[], outputs=[model])
-        refreshL.click(refreshLoRAs, inputs=[], outputs=[lora])
-        CL.click(toggleCL, inputs=[], outputs=CL)
-        CG.click(toggleCG, inputs=[], outputs=CG)
-        T5.click(toggleT5, inputs=[], outputs=T5)
-        ZN.click(toggleZN, inputs=[], outputs=ZN)
-        AS.click(toggleAS, inputs=[], outputs=AS)
-#        LFO.click(toggleLFO, inputs=[], outputs=LFO)
+        refreshM.click(refreshModels, inputs=None, outputs=[model])
+        refreshL.click(refreshLoRAs, inputs=None, outputs=[lora])
+        CL.click(toggleCL, inputs=None, outputs=CL)
+        CG.click(toggleCG, inputs=None, outputs=CG)
+        T5.click(toggleT5, inputs=None, outputs=T5)
+        ZN.click(toggleZN, inputs=None, outputs=ZN)
+        AS.click(toggleAS, inputs=None, outputs=AS)
+#        LFO.click(toggleLFO, inputs=None, outputs=LFO)
         swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
-        random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
+        random.click(lambda : -1, inputs=None, outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=gallery_index, outputs=sampling_seed, show_progress=False)
-        randNeg.click(randomString, inputs=[], outputs=[negative_prompt])
+        randNeg.click(randomString, inputs=None, outputs=[negative_prompt])
 
         i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery, gallery_index], outputs=[i2iSource])
         i2iCaption.click (fn=i2iMakeCaptions, inputs=[i2iSource, positive_prompt], outputs=[positive_prompt])
-        toPrompt.click(toggleC2P, inputs=[], outputs=[toPrompt])
+        toPrompt.click(toggleC2P, inputs=None, outputs=[toPrompt])
 
         output_gallery.select(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
 

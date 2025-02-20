@@ -73,9 +73,7 @@ from diffusers.models.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlN
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.utils import logging
 
-##  for Florence-2, including workaround for unnecessary flash_attn requirement
-from unittest.mock import patch
-from transformers.dynamic_module_utils import get_imports
+##  for Florence-2
 from transformers import AutoProcessor, AutoModelForCausalLM 
 
 ##   my stuff
@@ -855,11 +853,10 @@ def on_ui_tabs():
         if image == None:
             return originalPrompt
 
-        with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports): #workaround for unnecessary flash_attn requirement
-            model = AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-base', 
-                                                         attn_implementation="sdpa", 
-                                                         torch_dtype=torch.float16, 
-                                                         trust_remote_code=True).to('cuda')
+        model = AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-base', 
+                                                     attn_implementation="sdpa", 
+                                                     torch_dtype=torch.float16, 
+                                                     trust_remote_code=True).to('cuda')
         processor = AutoProcessor.from_pretrained('microsoft/Florence-2-base', #-large
                                                   torch_dtype=torch.float32, 
                                                   trust_remote_code=True)
@@ -868,7 +865,7 @@ def on_ui_tabs():
         prompts = ['<CAPTION>', '<DETAILED_CAPTION>', '<MORE_DETAILED_CAPTION>']
 
         for p in prompts:
-            inputs = processor(text=p, images=image, return_tensors="pt")
+            inputs = processor(text=p, images=image.convert("RGB"), return_tensors="pt")
             inputs.to('cuda').to(torch.float16)
             generated_ids = model.generate(
                 input_ids=inputs["input_ids"],
